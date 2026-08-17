@@ -1,0 +1,257 @@
+"""Tests for the session scratch directory: the Agent owns (or inherits) it,
+the ToolsRegistry hands it to every local MCP spawn as CAI_SCRATCH, and the
+builtin fs server admits it alongside the cwd jail. The fs server is really
+spawned - no network, everything under tmp_path."""
+import os
+import sys
+
+import pytest
+
+import cai
+from cai.agent import Agent
+from cai.environment import Environment, builtin_mcp_dir
+from cai.tools import ToolsRegistry
+
+
+def _fs_path():
+    return os.path.join(builtin_mcp_dir(), "fs.py")
+
+
+def test_safe_path_confines_to_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+    (tmp_path / "inside.txt").write_text("x")
+    assert cai.safe_path("inside.txt") == str(tmp_path / "inside.txt")
+    with pytest.raises(ValueError):
+        cai.safe_path("/etc/passwd")
+    with pytest.raises(ValueError):
+        cai.safe_path("../escape.txt")
+
+
+def test_safe_path_admits_the_scratch_dir(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_SCRATCH", str(scratch))
+    assert cai.safe_path(str(scratch / "artifact.bin")) == str(scratch / "artifact.bin")
+    assert cai.safe_path(str(scratch)) == str(scratch)
+    # a sibling that merely shares the scratch dir's name prefix stays jailed
+    with pytest.raises(ValueError):
+        cai.safe_path(str(tmp_path / "scratch-evil" / "x"))
+    with pytest.raises(ValueError):
+        cai.safe_path("/etc/passwd")
+
+
+def test_scratch_injected_into_declared_server(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "artifact.txt").write_text("intermediate bytes")
+    cai.mcp_server("myfs", command=[sys.executable, _fs_path()])
+
+    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry.select("myfs__read_file")
+    try:
+        out = registry.dispatch("myfs__read_file",
+                                {"file_path": str(scratch / "artifact.txt")})
+        assert "intermediate bytes" in out
+    finally:
+        registry.close()
+
+
+def test_scratch_injected_into_file_discovered_server(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "artifact.txt").write_text("found via builtins")
+
+    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry.select("fs__read_file")
+    try:
+        out = registry.dispatch("fs__read_file",
+                                {"file_path": str(scratch / "artifact.txt")})
+        assert "found via builtins" in out
+    finally:
+        registry.close()
+
+
+def test_declared_env_wins_over_injected_scratch(tmp_path):
+    declared = tmp_path / "declared"
+    declared.mkdir()
+    (declared / "a.txt").write_text("declared wins")
+    injected = tmp_path / "injected"
+    injected.mkdir()
+    (injected / "b.txt").write_text("never reachable")
+    cai.mcp_server("myfs",
+                   command=[sys.executable, _fs_path()],
+                   env={"CAI_SCRATCH": str(declared)})
+
+    registry = ToolsRegistry(scratch=lambda: str(injected))
+    registry.select("myfs__read_file")
+    try:
+        out = registry.dispatch("myfs__read_file", {"file_path": str(declared / "a.txt")})
+        assert "declared wins" in out
+        out = registry.dispatch("myfs__read_file", {"file_path": str(injected / "b.txt")})
+        assert "outside working directory" in out
+    finally:
+        registry.close()
+
+
+def test_no_scratch_provider_means_no_injection(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("jailed")
+
+    registry = ToolsRegistry()
+    registry.select("fs__read_file")
+    try:
+        out = registry.dispatch("fs__read_file", {"file_path": str(outside)})
+        assert "outside working directory" in out
+    finally:
+        registry.close()
+
+
+def test_scratch_does_not_unlock_other_paths(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("still jailed")
+
+    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry.select("fs__read_file")
+    try:
+        out = registry.dispatch("fs__read_file", {"file_path": str(elsewhere)})
+        assert "outside working directory" in out
+    finally:
+        registry.close()
+
+
+def test_scratch_dir_inside_a_function_tool_reads_the_provider(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+
+    @cai.tool
+    def where() -> str:
+        """where."""
+        return cai.scratch_dir()
+
+    registry = ToolsRegistry(scratch=lambda: str(tmp_path / "s"))
+    registry.select("where")
+    assert registry.dispatch("where", {}) == str(tmp_path / "s")
+
+
+def test_scratch_provider_only_called_when_a_tool_asks(tmp_path):
+    calls = []
+
+    def provider():
+        calls.append(1)
+        return str(tmp_path)
+
+    @cai.tool
+    def indifferent() -> str:
+        """indifferent."""
+        return "never asked"
+
+    registry = ToolsRegistry(scratch=provider)
+    registry.select("indifferent")
+    assert registry.dispatch("indifferent", {}) == "never asked"
+    assert calls == []
+
+
+def test_scratch_dir_outside_dispatch_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("CAI_SCRATCH", "/somewhere")
+    assert cai.scratch_dir() == "/somewhere"
+    monkeypatch.delenv("CAI_SCRATCH")
+    assert cai.scratch_dir() == ""
+
+
+def test_safe_path_admits_scratch_inside_a_function_tool(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+
+    @cai.tool
+    def jail(p: str) -> str:
+        """jail."""
+        return cai.safe_path(p)
+
+    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry.select("jail")
+    out = registry.dispatch("jail", {"p": str(scratch / "a.bin")})
+    assert out == str(scratch / "a.bin")
+    out = registry.dispatch("jail", {"p": "/etc/passwd"})
+    assert "outside working directory" in out
+
+
+def test_safe_path_expands_leading_scratch_token(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_SCRATCH", str(scratch))
+    assert cai.safe_path("$CAI_SCRATCH") == str(scratch)
+    assert cai.safe_path("$CAI_SCRATCH/dump.bin") == str(scratch / "dump.bin")
+    assert cai.safe_path("${CAI_SCRATCH}/dump.bin") == str(scratch / "dump.bin")
+
+
+def test_scratch_token_is_a_whole_segment_only(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_SCRATCH", str(scratch))
+    # not a token: a longer name that merely starts with the token text is left
+    # literal - a (odd) relative path under the cwd, not the scratch dir
+    assert cai.safe_path("$CAI_SCRATCHED/x") == str(cwd / "$CAI_SCRATCHED" / "x")
+
+
+def test_scratch_token_without_a_session_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+    with pytest.raises(ValueError):
+        cai.safe_path("$CAI_SCRATCH/dump.bin")
+
+
+def test_scratch_token_materializes_the_dir_inside_a_tool(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+    created = {}
+
+    def provider():
+        d = tmp_path / "lazy"
+        d.mkdir(exist_ok=True)
+        created["path"] = str(d)
+        return str(d)
+
+    @cai.tool
+    def jail(p: str) -> str:
+        """jail."""
+        return cai.safe_path(p)
+
+    registry = ToolsRegistry(scratch=provider)
+    registry.select("jail")
+    out = registry.dispatch("jail", {"p": "$CAI_SCRATCH/a.bin"})
+    assert out == os.path.join(created["path"], "a.bin")
+
+
+def test_agent_creates_scratch_lazily_and_deletes_on_close():
+    agent = Agent(model="m", api=object())
+    assert agent._scratch is None
+    path = agent.scratch()
+    assert os.path.isdir(path)
+    assert agent.scratch() == path
+    assert agent.tools_registry.scratch() == path
+    agent.close()
+    assert not os.path.exists(path)
+
+
+def test_agent_inherited_scratch_is_never_deleted(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    agent = Agent(model="m", api=object(), scratch=str(shared))
+    assert agent.scratch() == str(shared)
+    agent.close()
+    assert os.path.isdir(str(shared))

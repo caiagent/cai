@@ -1,0 +1,30 @@
+[project]
+name = "cai"
+version = "0.1.1"
+description = "A small LLM agent, built from scratch layer by layer."
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "urllib3",
+    "mcp",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+cai = "cai.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# builtins/ holds drop-in MCP servers (*.py, spawned as scripts) and skill files
+# (*.md). they live beside the package but are not importable modules, so they
+# must be declared as package data or a non-editable install drops them.
+[tool.setuptools.package-data]
+cai = ["builtins/mcps/*.py", "builtins/skills/*.md", "py.typed"]

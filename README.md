@@ -1,0 +1,274 @@
+# cai
+
+A small LLM agent, built from scratch layer by layer. One package gives you a
+CLI, a full-screen TUI, and a Python SDK — over any OpenAI-compatible endpoint.
+
+```
+Layer 0: cai.api    - the OpenAI-compatible HTTP client (the LLM call)
+Layer 1: cai.llm    - the core agentic loop (call_llm)
+Layer 2: cai.agent  - Agent (persistent conversation) + Run (one-shot execution)
+Entry:   cai.cli    - the `cai` command; drops into the TUI (cai.tui) when interactive
+```
+
+## Install
+
+```sh
+make install        # pip install .
+make dev            # pip install -e .[dev]
+```
+
+Requires Python >= 3.11.
+
+## Configuration
+
+Everything lives under `~/.config/cai/`. Two files are required:
+
+```sh
+cat > ~/.config/cai/config.json <<'EOF'
+{"base_url": "https://openrouter.ai/api/v1", "model": "anthropic/claude-sonnet-4"}
+EOF
+echo "sk-..." > ~/.config/cai/api_key
+```
+
+Nothing is defaulted: a missing or incomplete config stops cai with a clear
+message. If `~/.config/cai/SYSTEM.md` or `./SYSTEM.md` exist, they are appended
+to the system prompt (then `--system-prompt`, when given).
+
+### init.py
+
+`~/.config/cai/init.py` is optional Python imported on every load, after the
+extensions — so its registrations win. Everything the SDK registers works
+here: MCP servers, settings, tools, hooks, commands.
+
+```python
+import cai
+
+# MCP servers - local (spawned stdio subprocess) or remote (URL)
+cai.mcp_server("github",
+               command=["npx", "-y", "@modelcontextprotocol/server-github"],
+               env={"GITHUB_TOKEN": "..."})
+cai.mcp_server("linear",
+               url="https://mcp.linear.app/mcp",
+               headers={"Authorization": "Bearer ..."})
+
+# settings - the same object the TUI's :config overlay edits
+cai.settings.show_reasoning = False
+cai.settings.tool_result_max_chars = 20_000
+cai.settings.auto_save_sessions = True
+cai.settings.skills.append("fs")                  # auto-activated on CLI runs
+cai.settings.tools.append("github__search_issues")
+
+# any config.json field can be shadowed from here: a non-None cai.settings
+# attribute of the same name wins over the file (model, base_url, ssl_verify,
+# default_context_size, python_base, python_sandbox, python_venv).
+cai.settings.model = "anthropic/claude-sonnet-4"
+cai.settings.python_venv = "~/.pyenv/versions/cai-tools"  # run the python tool
+                                                          # under your own env
+
+# tools / hooks / commands - same decorators as the SDK
+@cai.tool
+def shout(text: str) -> str:
+    """upper-case text."""
+    return text.upper()
+
+@cai.hook("after_turn")
+def log_turn(ctx):
+    print(f"turn done, {len(ctx.messages)} messages")
+
+@cai.command(name="clear", help="wipe the conversation")
+def clear(ctx):
+    ctx.client.set_messages([])
+```
+
+## CLI
+
+```sh
+cai -- explain this error            # prompt after '--'
+git diff | cai -- write a commit message   # piped stdin becomes context
+cai --file main.py -- find the bug
+cai --skill fs -- rename foo to bar in src/
+cai -t fs__read_file -- summarize /etc/hosts
+cai --strict-format json -- list the planets as a JSON array
+```
+
+The prompt goes after `--` (or via `-p`) so `--skill`/`--tool` can take several
+values without swallowing it. When stdout is piped, progress goes to stderr and
+only the clean answer is printed. LLM knobs: `--model`, `--reasoning-effort`,
+`--temperature`, `--max-steps`, `--non-streaming`, `--cwd`. `--base-url` and
+`--api-key` override `config.json` / `~/.config/cai/api_key` for that run
+only — a one-off test of another provider without touching the config.
+`--allowed-paths p1,p2` grants tools access to files or directories beyond the
+working directory — a directory grants its subtree, a file just that file
+(published as `CAI_ALLOWED_PATHS`, which `cai.safe_path` and every spawned
+tool process honor; read-only inside the python-tool jail).
+
+Three stream modes ride the same flags:
+
+```sh
+cai --tail worker            # follow a live agent's conversation, read-only
+cai --tail                   # no name: pick a live agent with fzf
+tail -f app.log | cai --watch -- what broke?   # run the prompt on each settle
+cat urls.txt | cai --line-by-line --cores 4 -- is this site up?  # map over lines
+```
+
+`--tail` attaches to a served agent's unix socket (`~/.config/cai/agents/`)
+and prints the conversation as it happens — the backlog first, then the live
+stream; it never sends, so the agent can't be driven from a tail. `--watch`
+holds the prompt until piped stdin goes quiet for `--watch-settle-after` seconds,
+then runs it as a one-shot agent over the last `--watch-window` bytes of the
+stream; up to `--cores` runs may be in flight at once (default 1) — spawning
+past the limit kills the oldest run — and EOF triggers one final run over any
+unprocessed data and exits with the newest run's status. `--line-by-line` maps the prompt over each non-blank line of
+`--file` or piped stdin — one one-shot agent per line, up to `--cores` in
+flight at once (default 1), consuming the input as a stream (work starts on
+the first line, not at EOF) and printing the answers to stdout in input
+order, each prefixed by its source line (tab-separated), so every output
+carries its own reference.
+
+## TUI
+
+`cai` with no prompt (and a terminal attached) opens the full-screen
+interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
+session: `:models`, `:messages`, `:history`, `:sessions`, `:save`, `:load`,
+`:tools`, `:skills`, `:redraw` (repaint the view from the conversation, e.g.
+after flipping *show reasoning* in `:config`).
+
+```sh
+cai                 # new interactive session
+cai -c              # resume the most recent saved session
+cai --sessions      # pick a saved session to resume
+```
+
+Sessions are saved as `.flow` files — a small JSON document holding the
+conversation plus the settings needed to resume it.
+
+## Skills, tools, sub-agents
+
+- **Function tools** are plain Python callables registered with `@cai.tool`.
+- **MCP tools** come from MCP servers, named `<server>__<tool>` so two
+  servers can each expose a `search` without colliding. `fs` ships built in.
+  A server is either a `mcps/*.py` FastMCP stdio script, or declared with
+  `cai.mcp_server` (see [Configuration](#initpy)) — local or remote.
+- **Skills** are markdown files: a small header (`tools:`, `skills:`) plus a
+  prompt body. Activating one unions its tools into the registry and appends
+  its body to the system prompt. Built in: `fs`, `fs-read-only`, `subagents`.
+- A skill body may carry `{{name}}` **slots** — holes re-filled at the start
+  of every turn, so a skill can *push* live state into the system prompt
+  instead of making the model call a tool to fetch it. `{{tools}}` is built in
+  (the selected tools' signatures); register your own filler with `@cai.slot`
+  (namespaced `<extension>__<name>` in a bundle, like a tool). The filler gets
+  a `SlotContext` (`ctx.agent`, `ctx.skill`) and should be fast — it runs
+  every turn, and content that changes between turns invalidates prompt-prefix
+  caching. See `examples/extensions/memory` for the pattern.
+- The `subagents` skill gives the agent launch / wait / list / kill tools;
+  each child runs on its own unix socket with a reduce-only subset of the
+  parent's tools.
+- The `python` skill gives the agent a `python(code, timeout=60)` tool that
+  runs a snippet in a subprocess of a cai-managed virtualenv
+  (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only;
+  manage its packages with `cai python install|uninstall|list-packages`).
+  The snippet is jailed at the **kernel level**: it enters fresh user + mount +
+  network namespaces and pivots onto a root containing only the working
+  directory, the session scratch dir, the interpreter and the system library
+  dirs its C extensions load from — no other path exists, and there is no
+  network interface. The whole tree is mounted
+  **read-only except the scratch dir**, the one writable island. On top of
+  that, a `sys.addaudithook` jail enforces the same policy: it can read files
+  and list directories inside the jail but create, modify or delete only under
+  scratch, and subprocess/`ctypes`/`cffi` are blocked. The snippet also gets a
+  `tool_call(name, **kwargs)` builtin that dispatches the agent's *own* selected
+  tools in-process — through the same `before_tool_call` gates — so a script
+  can read a large tool result, reduce it in Python, and return only the
+  answer, the intermediate data never entering model context (and any file
+  changes go through a write tool like `fs__create_file`, under its own gate).
+  Point it at a different base interpreter with the optional `python_base` key
+  in `config.json`, or run it under an existing virtualenv of your own (e.g. a
+  `pyenv` one) with `python_venv` — cai never builds, rebuilds or deletes a
+  user-supplied env. On hosts that forbid unprivileged user namespaces (e.g.
+  default-hardened Docker) the tool fails closed — there the optional
+  `python_sandbox` key set to `"hook"` runs the audit-hook jail only, the
+  container itself being the boundary. Any of these keys can also be set from
+  `init.py` (`cai.settings.python_venv = "…"`), which shadows `config.json`.
+- The sandbox has three **modes**, granted by which python skill you activate
+  (so a sub-agent given plain `python` stays read-only while its parent runs a
+  wider one): `python` — read-only, writes under scratch only, as above;
+  `python-read-write` — writes also allowed under the working directory and
+  the `--allowed-paths` grants (the same policy the fs tools enforce);
+  `python-read-write-exec` — additionally allows running programs, the jail
+  then also carrying the system binary dirs read-only: a spawned process
+  inherits the namespaces, so it sees the same files, the same write roots and
+  no network, all kernel-enforced. No mode grants network. Under
+  `python_sandbox: "hook"` the exec mode's spawned programs are confined by
+  your container only.
+
+## Extensions
+
+An extension is a self-contained bundle directory carrying any of
+`skills/*.md`, `tools/*.py`, `mcps/*.py`, `init.py`, `hooks/init.py`,
+`commands/init.py`, and a `README.md`. Installing drops it under
+`~/.config/cai/extensions/<name>/`, where `Environment.load()` discovers it.
+
+```sh
+cai extend ./my-bundle              # install a folder, .zip, or http(s) URL
+cai extend --list
+cai extend --remove my-bundle
+```
+
+See `examples/extensions/`:
+
+- `compact` — context compaction as a `:compact` command plus an `after_turn`
+  auto-compact hook, in one `init.py`.
+- `clone` — `:clone`, a session checkpoint: save the session, then swap the
+  served agent for a fresh branch of itself and keep going.
+- `summarize` — `:summarize`, branch and continue reduced: checkpoint, branch,
+  and carry forward only a one-message summary of the session.
+- `memory` — a persistent note store the model reads for free: a
+  `{{memory__notes}}` slot pushes the latest entries into the system prompt
+  each turn; tools only mutate the store.
+
+## SDK
+
+```python
+import cai
+
+# one-shot
+run = cai.Run(messages=[{"role": "user", "content": "hello"}])
+print(run.wait().text)
+
+# persistent conversation, streaming, with tools
+agent = cai.Agent(skills=["fs"])
+for event in agent.run("what's in ./src?"):
+    if event.type == cai.EventType.CONTENT:
+        print(event.text, end="", flush=True)
+agent.save("session.flow")
+```
+
+Tools are explicit: `tools=` takes Python callables or MCP tool-name strings;
+`skills=` takes skill names; `hooks=` takes `(event, fn)` pairs. Only what you
+pass is sent to the model. An `Agent` is constructed against an `Environment`
+(`env=`), so two agents in one process can see two different installs — and a
+test builds a private empty one instead of resetting globals.
+
+```python
+@cai.tool
+def word_count(text: str) -> int:
+    """count the words in text."""
+    return len(text.split())
+
+@cai.hook("before_tool_call")
+def veto(ctx):
+    if ctx.tool_call.name == "fs__write_file": return False
+
+@cai.command
+def stats(ctx):
+    ctx.write(f"{len(ctx.client.get_messages())} messages")
+```
+
+## Development
+
+```sh
+make test           # pytest -q
+make clean
+```
+
+Logs go to `/tmp/cai.log`.
