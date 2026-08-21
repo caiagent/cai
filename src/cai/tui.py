@@ -1115,50 +1115,63 @@ def _attach_agent(screen, node, cfg, stop_fn):
     ignored (the owner answers them) - so the watched agent cannot be driven
     from here. the snapshot is fetched after the stream attaches, so a message
     completing in between may render twice - a duplicated tool line at worst,
-    never a lost one. returns False when the socket is unreachable (the agent
-    just finished), so the caller falls back to the static transcript."""
+    never a lost one. Ctrl-L hands off to the messages overlay (the overlays
+    each own the terminal, so it opens here, between attach entries) and then
+    re-attaches - a fresh connect and snapshot, same as the first entry.
+    returns False when the socket is unreachable on the first attempt (the
+    agent just finished), so the caller falls back to the scrollback attach
+    view over the autosaved flow; an agent that dies during the messages
+    overlay ends the dive back at the tree instead."""
     from cai.agents_registry import AgentsRegistry
 
     name = node["id"]
-    try:
-        channel = AgentsRegistry.connect(name)
-    except OSError:
-        return False
-    stream = Wire(channel)
-    snapshot = _agent_control(name, "get_messages")
-    view = _AttachView(screen._cols)
-    _replay_messages(view, snapshot or [], cfg)
-    transcript = _Transcript(view, cfg)
     title = node.get("name") or name
-
-    def _drain():
+    attached = False
+    while True:
         try:
-            messages = stream.recv()
+            channel = AgentsRegistry.connect(name)
         except OSError:
-            messages = None
+            return attached
+        stream = Wire(channel)
+        snapshot = _agent_control(name, "get_messages")
+        view = _AttachView(screen._cols)
+        _replay_messages(view, snapshot or [], cfg)
+        transcript = _Transcript(view, cfg)
+
+        def _drain():
+            try:
+                messages = stream.recv()
+            except OSError:
+                messages = None
+            if messages is None:
+                transcript.note(f"[{title} finished]\n", Screen.META)
+                return False
+            for msg in messages:
+                if msg.get("type") != Wire.EVENT: continue
+                transcript.event(Wire.event_from_dict(msg["event"]))
+            return True
+
+        def _kill():
+            stop_fn(name)
+
+        try:
+            action = screen.prompt_attach_overlay(view,
+                                                  title=title,
+                                                  watch=channel,
+                                                  drain_fn=_drain,
+                                                  kill_fn=_kill)
+        finally:
+            try:
+                channel.close()
+            except OSError:
+                pass
+        attached = True
+        if action != "messages":
+            return True
+        messages = _agent_control(name, "get_messages")
         if messages is None:
-            transcript.note(f"[{title} finished]\n", Screen.META)
-            return False
-        for msg in messages:
-            if msg.get("type") != Wire.EVENT: continue
-            transcript.event(Wire.event_from_dict(msg["event"]))
-        return True
-
-    def _kill():
-        stop_fn(name)
-
-    try:
-        screen.prompt_attach_overlay(view,
-                                     title=title,
-                                     watch=channel,
-                                     drain_fn=_drain,
-                                     kill_fn=_kill)
-    finally:
-        try:
-            channel.close()
-        except OSError:
-            pass
-    return True
+            messages = snapshot or []
+        screen.prompt_messages_overlay(messages)
 
 
 def _open_agents(screen, client, cfg):
@@ -1261,8 +1274,8 @@ def _open_agents(screen, client, cfg):
             channel.close()
 
     # Enter dives into the selected agent, ESC backs out one level: the attach
-    # view (or the static transcript) returns to the tree, the tree to the
-    # conversation.
+    # view (live-streaming for a running agent, pure scrollback for a finished
+    # one) returns to the tree, the tree to the conversation.
     while True:
         sel = screen.prompt_agents_overlay(_nodes, _preview, stop_fn=_stop,
                                            self_id=self_name)
@@ -1283,7 +1296,14 @@ def _open_agents(screen, client, cfg):
         if messages is None:
             screen.write("[no transcript for this agent]\n", kind=Screen.META, block=True)
             return
-        screen.prompt_messages_overlay(messages)
+        view = _AttachView(screen._cols)
+        _replay_messages(view, messages, cfg)
+        while True:
+            action = screen.prompt_attach_overlay(view,
+                                                  title=chosen.get("name") or chosen["id"])
+            if action != "messages":
+                break
+            screen.prompt_messages_overlay(messages)
 
 
 def _chip_lines(skills, tools):

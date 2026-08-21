@@ -11,7 +11,9 @@ the agent tore down). Nothing here ever writes to the socket, so the watched
 agent cannot be driven from this view - read-only by construction.
 
 Keys: j/k scroll (wheel too), gg/G jump (G re-follows the tail), Ctrl-U/D
-half-page, Ctrl-K kills the watched agent, ESC/q detaches (it runs on)."""
+half-page, Ctrl-K kills the watched agent, Ctrl-L hands off to the messages
+overlay (returns 'messages'; the caller opens it and may re-enter), ESC/q
+detaches (it runs on)."""
 
 import select
 import shutil
@@ -27,7 +29,7 @@ from ..ansi import (
     ERASE_SCREEN,
     SGR_AZURE_ON_DGRAY, SGR_RESET,
     SYNC_START, SYNC_END,
-    KEY_ESC, KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_U,
+    KEY_ESC, KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_U,
     KEY_UP, KEY_DOWN,
 )
 from ..input import read_key, parse_mouse
@@ -42,7 +44,9 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
     """full-screen read-only viewport over `view`, following its tail while
     drain_fn appends. watch is the socket select()ed next to the tty (None
     for an agent that already finished: pure scrollback); kill_fn()
-    interrupts the watched agent on Ctrl-K. returns on ESC/q."""
+    interrupts the watched agent on Ctrl-K. returns None on ESC/q, or
+    'messages' on Ctrl-L - the caller opens the messages overlay (the two
+    overlays each own the terminal, so they cannot nest) and may re-enter."""
     alive = watch is not None and drain_fn is not None
     follow = True
     offset = 0
@@ -57,10 +61,11 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
 
     def _status_row():
         state = 'finished'
+        hints = 'j/k:scroll G:tail ^L:messages ESC:back '
         if alive:
             state = 'running'
+            hints = 'j/k:scroll G:tail ^K:kill ^L:messages ESC:back '
         left = f' {title} · read-only · {state}'
-        hints = 'j/k:scroll G:tail ^K:kill ESC:back '
         pad = max(1, screen._cols - len(left) - len(hints))
         bar = (left + ' ' * pad + hints)[:screen._cols]
         return f'{SGR_AZURE_ON_DGRAY}{bar}{SGR_RESET}'
@@ -142,7 +147,9 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
                 continue
 
             if key == KEY_ESC or key == 'q' or key == KEY_CTRL_C:
-                return
+                return None
+            if key == KEY_CTRL_L:
+                return 'messages'
             if key == KEY_CTRL_K:
                 if alive and kill_fn is not None:
                     kill_fn()
