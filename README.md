@@ -271,4 +271,5 @@ make test           # pytest -q
 make clean
 ```
 
-Logs go to `/tmp/cai.log`.
+Logs go to `cai.log` in the platform temp directory (`$TMPDIR`, falling back to
+`/tmp`); set `CAI_LOG_FILE` to put them somewhere else.

@@ -11,16 +11,27 @@ Entry:   cai.config      - bootstrap settings (API key, OpenRouter endpoint).
          cai.cli         - the `cai` command: prompt in, streamed answer out.
 """
 import logging
+import os
+import tempfile
 from typing import TYPE_CHECKING
 
 # every module logs through getLogger("cai"); point that at a file so the
 # diagnostics (MCP spawns, tool failures, wired turns) land somewhere readable
 # instead of the default stderr-only / dropped-below-WARNING behaviour.
-logging.basicConfig(
-    filename="/tmp/cai.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
+# the directory is the platform temp dir - TMPDIR/TEMP/TMP, then /tmp, see
+# tempfile.gettempdir() - not a hardcoded /tmp, which `import cai` must not
+# require: it is absent or read-only on Termux, inside the python-tool jail and
+# in sandboxes that relocate temp. CAI_LOG_FILE names the file outright.
+LOG_FILE = os.environ.get("CAI_LOG_FILE") or os.path.join(
+    tempfile.gettempdir(), "cai.log"
 )
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+try:
+    logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=_LOG_FORMAT)
+except OSError:
+    # unwritable path (a stale root-owned cai.log in a shared /tmp, a bad
+    # CAI_LOG_FILE): fall back to stderr rather than failing the import.
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
 
 from cai.paths import safe_path, scratch_dir
 from cai.events import Event, EventType
