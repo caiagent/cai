@@ -49,8 +49,10 @@ def command(fn=None, *, name=None, help=""):
 class CommandContext:
     """what a command's fn receives: the text after the command name, the agent
     client to drive (get_messages / set_messages / get_info / submit / steer),
-    and the screen to write back to. the typed fields let an extension author's
-    editor jump from ctx.client.<method> into its definition."""
+    and the screen to write back to (its get_input / set_input reach the unsent
+    draft in the input box, which survives the `:` command). the typed fields
+    let an extension author's editor jump from ctx.client.<method> into its
+    definition."""
     args: str
     client: AgentClient
     screen: Screen

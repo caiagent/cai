@@ -23,7 +23,12 @@ the working directory and the CAI_ALLOWED_PATHS grants; "read-write-exec"
 additionally allows running programs - the jail then also carries the system
 binary dirs and the standard /dev nodes, and a spawned process inherits the
 namespaces, so it sees the same files, the same write roots and no network,
-kernel-enforced (audit hooks do not survive into an exec'd binary)."""
+kernel-enforced (audit hooks do not survive into an exec'd binary).
+
+CAI_DISALLOWED_PATHS entries are denied in every mode: the audit hook refuses
+them outright, and the kernel jail masks each one that a bound root would
+otherwise carry (an empty read-only tmpfs over a directory, an empty file over
+a file) so a spawned program cannot see them either."""
 import sys
 import os
 import json
@@ -34,6 +39,7 @@ import json
 # before either jail goes up.
 read_roots = []
 write_roots = []
+denied_roots = []
 mode = "read-only"
 
 
@@ -49,6 +55,16 @@ def compute_read_roots():
         roots.append(real)
     for prefix in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
         real = os.path.realpath(prefix)
+        if real in roots: continue
+        roots.append(real)
+    return roots
+
+
+def compute_denied_roots():
+    roots = []
+    for entry in os.environ.get("CAI_DISALLOWED_PATHS", "").split(os.pathsep):
+        if not entry: continue
+        real = os.path.realpath(entry)
         if real in roots: continue
         roots.append(real)
     return roots
@@ -160,6 +176,39 @@ def system_world():
     return dirs, files
 
 
+EMPTY_FILE = "/.cai-empty"
+
+
+def mask_denied(ctypes, libc, need, staging, kept, attr):
+    """hide every denied root a bound root carries: an empty read-only tmpfs
+    over a directory, the empty EMPTY_FILE decoy (on the staging tmpfs) over
+    a file. runs last - after the write roots' fresh recursive binds, which
+    would bury a mask stacked earlier. a denied path under no bound root is
+    already absent from the jail. attr is the RDONLY mount_setattr, applied
+    to the mask alone (non-recursive) so it stays unwritable even inside a
+    read-write island."""
+    empty = staging + EMPTY_FILE
+    for root in denied_roots:
+        if not covered(root, kept):
+            continue
+        target = staging + root
+        if not os.path.lexists(target):
+            continue
+        if os.path.isdir(target):
+            need(libc.mount(b"tmpfs", target.encode(), b"tmpfs", 0, None),
+                 f"mask {root}")
+        else:
+            need(libc.mount(empty.encode(), target.encode(), None, MS_BIND, None),
+                 f"mask {root}")
+        need(libc.syscall(MOUNT_SETATTR_NR,
+                          AT_FDCWD,
+                          target.encode(),
+                          0,
+                          ctypes.byref(attr),
+                          ctypes.sizeof(attr)),
+             f"make mask {root} read-only")
+
+
 def bind_system_world(libc, need, staging, kept):
     """make dlopen (and, in exec mode, exec) work inside the jail: bind the
     system_world() dirs and files, skipping whatever a read root's recursive
@@ -259,6 +308,11 @@ def enter_kernel_jail():
 
     need(libc.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None), "make / private")
     need(libc.mount(b"tmpfs", staging.encode(), b"tmpfs", 0, None), "mount tmpfs")
+    # the decoy mask_denied binds over a denied file - made now, while the
+    # staging tmpfs is still writable.
+    if denied_roots:
+        with open(staging + EMPTY_FILE, "w"):
+            pass
 
     kept = bind_roots()
     for root in kept:
@@ -310,6 +364,7 @@ def enter_kernel_jail():
         target = staging + root
         need(libc.mount(root.encode(), target.encode(), None, MS_BIND | MS_REC, None),
              f"bind {root} read-write")
+    mask_denied(ctypes, libc, need, staging, kept, attr)
     os.chdir(staging)
     need(libc.syscall(PIVOT_ROOT_NR[machine], b".", b"."), "pivot_root")
     need(libc.umount2(b".", MNT_DETACH), "detach old root")
@@ -402,6 +457,15 @@ def under(path, roots):
     return False
 
 
+def denied(path):
+    """True when path resolves into a denied root. non-path args pass."""
+    if isinstance(path, bytes):
+        path = os.fsdecode(path)
+    if not isinstance(path, str):
+        return False
+    return under(path, denied_roots)
+
+
 def wants_write(mode, flags):
     if isinstance(mode, str):
         for ch in "wax+":
@@ -434,6 +498,8 @@ def check(event, args):
         raise PermissionError(f"cai sandbox: {event} is blocked")
     if event == "open":
         path, open_mode, flags = args
+        if denied(path):
+            raise PermissionError(f"cai sandbox: path is disallowed: {path!r}")
         if wants_write(open_mode, flags):
             if under(path, write_roots):
                 return
@@ -441,6 +507,10 @@ def check(event, args):
         if not under(path, read_roots):
             raise PermissionError(f"cai sandbox: open outside the working directory: {path!r}")
         return
+    if event in READ_EVENTS or event in WRITE_EVENTS:
+        for arg in args:
+            if not denied(arg): continue
+            raise PermissionError(f"cai sandbox: path is disallowed: {arg!r}")
     if event in READ_EVENTS:
         for arg in args:
             if under(arg, read_roots): continue
@@ -518,12 +588,13 @@ def tool_globals():
 
 
 def main():
-    global read_roots, write_roots, mode, _RPC_RD, _RPC_WR
+    global read_roots, write_roots, denied_roots, mode, _RPC_RD, _RPC_WR
 
     code = sys.stdin.read()
     mode = os.environ.get("CAI_PY_MODE", "read-only")
     read_roots = compute_read_roots()
     write_roots = compute_write_roots()
+    denied_roots = compute_denied_roots()
 
     if os.environ.get("CAI_PY_SANDBOX", "kernel") != "hook":
         try:

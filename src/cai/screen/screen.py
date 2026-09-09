@@ -523,6 +523,17 @@ class Screen:
         keypress). used by the attach pump when the served host exits."""
         self._prompt_abort = True
 
+    def get_input(self):
+        """the unsent draft in the input box as one string."""
+        return ''.join(self._input_buf)
+
+    def set_input(self, text):
+        """replace the unsent draft; cursor to the end. the next prompt() call
+        re-measures the input height and repaints, so no render is needed here
+        (a command handler runs between two prompt() calls on the main thread)."""
+        self._input_buf = list(text)
+        self._cursor_pos = len(self._input_buf)
+
     def clear_buffer(self):
         """clear the content buffer and refresh."""
         self._buffer.clear()

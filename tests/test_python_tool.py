@@ -217,6 +217,64 @@ def test_reading_and_listing_allowed_inside_the_jail(tmp_path, monkeypatch):
         agent.close()
 
 
+def test_disallowed_paths_are_masked_inside_the_jail(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "key.pem").write_text("private bytes")
+    denied_file = tmp_path / "denied.txt"
+    denied_file.write_text("also private")
+    (tmp_path / "open.txt").write_text("public bytes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAI_DISALLOWED_PATHS", os.pathsep.join([str(secret), str(denied_file)]))
+    # exec mode: a spawned program sees only the kernel masks (no audit hook),
+    # so it proves the masks hold on their own
+    agent = _agent_with_skill("python-read-write-exec")
+    # wrapped in markers: the tool renders empty stdout as "(no output)"
+    sh = ("import subprocess; r = subprocess.run(['sh','-c',{cmd!r}],capture_output=True,text=True);"
+          " print('<' + r.stdout.strip() + '>')")
+    try:
+        # the rest of cwd is as usable as ever - even writable in this mode
+        assert _run(agent, "print(open('open.txt').read())").strip() == "public bytes"
+        assert _run(agent, "open('new.txt','w').write('x'); print('ok')").strip() == "ok"
+        # in-process, the audit hook refuses a denied path outright
+        out = _run(agent, "print(open('secret/key.pem').read())")
+        assert "private bytes" not in out
+        assert "disallowed" in out
+        # a denied directory is an empty read-only tmpfs: listing shows nothing,
+        # its contents cannot be read, nothing can be created inside
+        assert _run(agent, sh.format(cmd="ls secret")).strip() == "<>"
+        assert _run(agent, sh.format(cmd="cat secret/key.pem")).strip() == "<>"
+        assert _run(agent, sh.format(cmd="echo x > secret/new.txt && echo ok")).strip() == "<>"
+        assert not (secret / "new.txt").exists()
+        # a denied file reads back empty and cannot be written
+        assert _run(agent, sh.format(cmd="cat denied.txt")).strip() == "<>"
+        assert _run(agent, sh.format(cmd="echo x > denied.txt && echo ok")).strip() == "<>"
+        assert denied_file.read_text() == "also private"
+        assert (secret / "key.pem").read_text() == "private bytes"
+    finally:
+        agent.close()
+
+
+def test_disallowed_paths_refused_by_the_hook_jail(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "hook")
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "key.pem").write_text("private bytes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAI_DISALLOWED_PATHS", str(secret))
+    agent = _agent_with_echo()
+    try:
+        out = _run(agent, "print(open('secret/key.pem').read())")
+        assert "private bytes" not in out
+        assert "disallowed" in out
+        assert "disallowed" in _run(agent, "import os; print(os.listdir('secret'))")
+    finally:
+        agent.close()
+
+
 def test_allowed_file_grant_binds_into_the_jail(tmp_path, monkeypatch):
     _fast_venv(monkeypatch)
     cwd = tmp_path / "cwd"

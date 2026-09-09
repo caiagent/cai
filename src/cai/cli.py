@@ -228,6 +228,11 @@ def build_parser():
                         metavar="PATH,...",
                         help="extra files or directories (comma-separated) tools may "
                              "access beyond the working directory")
+    parser.add_argument("--disallowed-paths",
+                        default=None,
+                        metavar="PATH,...",
+                        help="files or directories (comma-separated) tools may never "
+                             "access, even inside the working directory")
     parser.add_argument("--model",
                         default=None,
                         help="model id (default: the `model` field in config.json)")
@@ -452,10 +457,10 @@ def _drive(run, show_reasoning=True):
     return 0
 
 
-def _publish_allowed_paths(spec):
-    """resolve the --allowed-paths entries (comma-separated files or
-    directories) and export them as CAI_ALLOWED_PATHS for cai.safe_path and
-    every spawned tool process. False when an entry does not exist."""
+def _publish_paths(flag, var, spec):
+    """resolve the comma-separated files or directories of a path flag and
+    export them under the env var for cai.safe_path and every spawned tool
+    process. False when an entry does not exist."""
     roots = []
     for entry in spec.split(","):
         entry = entry.strip()
@@ -463,13 +468,23 @@ def _publish_allowed_paths(spec):
             continue
         root = os.path.realpath(entry)
         if not os.path.exists(root):
-            print(f"--allowed-paths entry does not exist: {entry!r}",
-                  file=sys.stderr)
+            print(f"{flag} entry does not exist: {entry!r}", file=sys.stderr)
             return False
         roots.append(root)
     if roots:
-        os.environ["CAI_ALLOWED_PATHS"] = os.pathsep.join(roots)
+        os.environ[var] = os.pathsep.join(roots)
     return True
+
+
+def _publish_allowed_paths(spec):
+    """--allowed-paths -> CAI_ALLOWED_PATHS (extra roots beyond the cwd)."""
+    return _publish_paths("--allowed-paths", "CAI_ALLOWED_PATHS", spec)
+
+
+def _publish_disallowed_paths(spec):
+    """--disallowed-paths -> CAI_DISALLOWED_PATHS (paths denied everywhere,
+    even inside the cwd or a grant)."""
+    return _publish_paths("--disallowed-paths", "CAI_DISALLOWED_PATHS", spec)
 
 
 def main(argv=None):
@@ -538,12 +553,16 @@ def main(argv=None):
             print(f"cannot change to --cwd {args.cwd!r}: {e}", file=sys.stderr)
             return 1
 
-    # --allowed-paths: publish the extra roots as CAI_ALLOWED_PATHS after the
-    # --cwd chdir (so relative entries resolve against it). cai.safe_path reads
-    # the var in-process, and every spawned MCP server / python-tool child
-    # inherits it through os.environ.
+    # --allowed-paths / --disallowed-paths: publish the roots as
+    # CAI_ALLOWED_PATHS / CAI_DISALLOWED_PATHS after the --cwd chdir (so
+    # relative entries resolve against it). cai.safe_path reads the vars
+    # in-process, and every spawned MCP server / python-tool child inherits
+    # them through os.environ.
     if args.allowed_paths is not None:
         if not _publish_allowed_paths(args.allowed_paths):
+            return 1
+    if args.disallowed_paths is not None:
+        if not _publish_disallowed_paths(args.disallowed_paths):
             return 1
 
     # heavy imports happen only here - after argcomplete has short-circuited, so

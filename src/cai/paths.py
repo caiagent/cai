@@ -13,7 +13,9 @@ model uses to address scratch without knowing its real, per-session path).
 Extra roots can be granted via the CAI_ALLOWED_PATHS env var (os.pathsep-joined
 files or directories; the --allowed-paths CLI flag sets it), which spawned MCP
 servers and the python-tool child inherit like CAI_SCRATCH. A directory grants
-its whole subtree; a file grants just that file.
+its whole subtree; a file grants just that file. CAI_DISALLOWED_PATHS (the
+--disallowed-paths flag) is the mirror image: paths denied everywhere, even
+inside the cwd or a grant - a deny always wins over an allow.
 Exposed as cai.safe_path / cai.scratch_dir so an extension's MCP servers and
 function tools share one implementation instead of vendoring copies. A server
 file cai spawns runs under the same interpreter, so `from cai import safe_path`
@@ -24,6 +26,7 @@ from contextvars import ContextVar
 
 _SCRATCH_VAR = "CAI_SCRATCH"
 _ALLOWED_VAR = "CAI_ALLOWED_PATHS"
+_DISALLOWED_VAR = "CAI_DISALLOWED_PATHS"
 
 
 # the in-process scratch source: ToolsRegistry sets it to its provider (a
@@ -61,16 +64,26 @@ def _expand_scratch(user_path):
     return user_path
 
 
-def allowed_paths():
-    """the extra files/directories granted via CAI_ALLOWED_PATHS, realpath'd,
-    or [] when the var is unset/empty."""
-    raw = os.environ.get(_ALLOWED_VAR, "")
+def _roots_from(var):
+    raw = os.environ.get(var, "")
     roots = []
     for entry in raw.split(os.pathsep):
         if not entry:
             continue
         roots.append(os.path.realpath(entry))
     return roots
+
+
+def allowed_paths():
+    """the extra files/directories granted via CAI_ALLOWED_PATHS, realpath'd,
+    or [] when the var is unset/empty."""
+    return _roots_from(_ALLOWED_VAR)
+
+
+def disallowed_paths():
+    """the files/directories denied via CAI_DISALLOWED_PATHS, realpath'd, or
+    [] when the var is unset/empty."""
+    return _roots_from(_DISALLOWED_VAR)
 
 
 def _under(resolved, root):
@@ -80,11 +93,15 @@ def _under(resolved, root):
 def safe_path(user_path):
     """resolve user_path relative to the cwd and reject traversal outside it;
     the session scratch directory (scratch_dir(), when set) and the
-    CAI_ALLOWED_PATHS grants are allowed too, and a leading $CAI_SCRATCH
-    addresses scratch by name."""
+    CAI_ALLOWED_PATHS grants are allowed too, a CAI_DISALLOWED_PATHS entry is
+    rejected wherever it sits, and a leading $CAI_SCRATCH addresses scratch by
+    name."""
     user_path = _expand_scratch(user_path)
     cwd = os.path.realpath(os.getcwd())
     resolved = os.path.realpath(os.path.join(cwd, user_path))
+    for root in disallowed_paths():
+        if _under(resolved, root):
+            raise ValueError(f"Error: path is disallowed: {user_path!r}")
     if _under(resolved, cwd):
         return resolved
     scratch = scratch_dir()

@@ -101,6 +101,11 @@ only — a one-off test of another provider without touching the config.
 working directory — a directory grants its subtree, a file just that file
 (published as `CAI_ALLOWED_PATHS`, which `cai.safe_path` and every spawned
 tool process honor; read-only inside the python-tool jail).
+`--disallowed-paths p1,p2` is the mirror image: files or directories tools may
+never touch, even inside the working directory or a grant — a deny always
+wins (published as `CAI_DISALLOWED_PATHS`; the python-tool jail masks each
+one with an empty read-only mount, so spawned programs cannot see them
+either).
 
 Three stream modes ride the same flags:
 
@@ -193,7 +198,8 @@ conversation plus the settings needed to resume it.
   (so a sub-agent given plain `python` stays read-only while its parent runs a
   wider one): `python` — read-only, writes under scratch only, as above;
   `python-read-write` — writes also allowed under the working directory and
-  the `--allowed-paths` grants (the same policy the fs tools enforce);
+  the `--allowed-paths` grants (the same policy the fs tools enforce, the
+  `--disallowed-paths` denies included);
   `python-read-write-exec` — additionally allows running programs, the jail
   then also carrying the system binary dirs read-only: a spawned process
   inherits the namespaces, so it sees the same files, the same write roots and
