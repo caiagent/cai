@@ -552,6 +552,18 @@ class ModeHandler:
         )
 
     def _handle_insert(self, key, state, screen):
+        live = screen._live
+        if live is not None:
+            if key == KEY_ESC and not live.searching:
+                self._insert_to_normal(state, screen)
+                screen._refresh_all()
+                return
+            if live.handle_key(key):
+                screen.finish_live()
+            else:
+                screen.repaint_live()
+            return
+
         if key == KEY_ESC:
             self._insert_to_normal(state, screen)
             screen._refresh_all()

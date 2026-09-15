@@ -213,6 +213,8 @@ class Wire:
             value = ui.confirm(message, default=bool(default), detail=detail)
         elif kind == "select":
             value = ui.select(message, msg.get("options") or [], default=default, detail=detail)
+        elif kind == "multiselect":
+            value = ui.multiselect(message, msg.get("options") or [], default=default or [], detail=detail)
         elif kind == "text":
             base = default
             if base is None: base = ""

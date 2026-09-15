@@ -18,7 +18,7 @@ from ..ansi import (
     KEY_CTRL_D, KEY_CTRL_U, KEY_TAB, KEY_UP, KEY_DOWN,
 )
 from ..input import read_key, parse_mouse
-from .tools import _find_matches, _handle_search_key, _style_cell
+from ..togglelist import _find_matches, _handle_search_key, _style_cell
 from ...models import load_favorites, toggle_favorite
 
 

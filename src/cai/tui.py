@@ -41,7 +41,7 @@ from cai.screen.render import python_code_arg, render_python_code
 from cai.screen.overlays import config as overlay_config
 from cai.screen.overlays.config import Setting
 from cai.session import SessionsRegistry
-from cai.ui import BaseUI
+from cai.ui import BaseUI, reset_ui, set_ui
 from cai.wire import Wire
 
 
@@ -532,6 +532,18 @@ class ScreenUI(BaseUI):
         result = self._screen.submit_request(request)
         if result is None:
             return BaseUI.select(self, message, options, default=default, detail=detail)
+        return result
+
+    def multiselect(self, message, options, *, default=(), detail=""):
+        options = list(options)
+        request = {}
+        request["kind"] = "multiselect"
+        request["title"] = message
+        request["options"] = options
+        request["default"] = list(default)
+        result = self._screen.submit_request(request)
+        if result is None:
+            return BaseUI.multiselect(self, message, options, default=default, detail=detail)
         return result
 
     def text(self, message, *, default="", secret=False):
@@ -1647,7 +1659,7 @@ def _refresh_tokens(status):
     status.set_tokens(0)
 
 
-def _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
+def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, ui):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -1752,11 +1764,14 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
     command = env.commands().get(head)
     if command is not None:
         ctx = CommandContext(arg, client, screen)
+        token = set_ui(ui)
         try:
             command.fn(ctx)
         except Exception:
             log.exception("command :%s raised", head)
             screen.write(f"[command :{head} failed]\n", kind=Screen.META, block=True)
+        finally:
+            reset_ui(token)
         return False
     screen.write(f"[unknown command: :{head}]\n", kind=Screen.META, block=True)
     return False
@@ -1938,7 +1953,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
+                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending, worker._ui):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just

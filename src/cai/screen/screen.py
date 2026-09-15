@@ -22,7 +22,7 @@ import tty
 
 from .ansi import (
     SGR_RESET, SGR_BOLD, SGR_CYAN, SGR_DIM_GRAY, SGR_BOLD_RED,
-    SGR_GREEN, SGR_YELLOW, SGR_RED,
+    SGR_GREEN, SGR_YELLOW, SGR_RED, SGR_MAGENTA,
     SGR_AZURE_ON_DGRAY,
     CUR_SHOW, CUR_HIDE,
     CURSOR_BAR, CURSOR_BLOCK, CURSOR_RESET,
@@ -31,9 +31,11 @@ from .ansi import (
     MOUSE_ON, MOUSE_OFF,
     BRACKET_PASTE_ON, BRACKET_PASTE_OFF,
     SYNC_START, SYNC_END,
+    cur_move, ansi_strip,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer, GUTTER_GLYPH
+from .ask import ConfirmAsk, SelectAsk, MultiAsk, TextAsk
 from .layout import Layout
 from .modes import ModeHandler
 from .input import read_key, editor_argv
@@ -58,6 +60,7 @@ class Screen:
     META      = 'meta'
     TOOL      = 'tool'
     ERROR     = 'error'
+    ASK       = 'ask'
     DEFAULT   = 'default'
 
     _KIND_STYLES = {
@@ -67,6 +70,7 @@ class Screen:
         META:      SGR_DIM_GRAY,
         TOOL:      SGR_DIM_GRAY,
         ERROR:     SGR_BOLD_RED,
+        ASK:       '',
         DEFAULT:   '',
     }
 
@@ -81,6 +85,7 @@ class Screen:
         META:      SGR_DIM_GRAY,
         TOOL:      SGR_YELLOW,
         ERROR:     SGR_RED,
+        ASK:       SGR_MAGENTA,
         DEFAULT:   '',
     }
 
@@ -151,6 +156,15 @@ class Screen:
         # calls.
         self._req_lock = threading.Lock()
         self._req_pending = None  # (request: dict, done: Event, box: dict) | None
+
+        # the ask element (ask.py) the conversation is waiting on, the buffer
+        # segment it is drawn in, and the (done, box) of the request it
+        # answers. _live_nested marks a request from the main thread, which
+        # drives its own prompt() and must be released when the answer lands.
+        self._live = None
+        self._live_seg = -1
+        self._live_request = None
+        self._live_nested = False
 
         # set by abort_prompt() so a background thread can make a blocked
         # prompt() return without a keypress (the attach pump on host-exit).
@@ -316,6 +330,7 @@ class Screen:
                                                  self._state.cursor_row,
                                                  self._state.viewport_offset,
                                                  self._state.cursor_col)
+                    self._place_live_cursor()
                 sys.stdout.write(SYNC_END)
                 sys.stdout.flush()
                 self._last_render_time = now
@@ -558,6 +573,8 @@ class Screen:
             self._req_pending = None
         if pend is not None:
             pend[1].set()
+        if self._live_request is not None:
+            self._live_request[0].set()
         sys.stdout.write(f'{MOUSE_OFF}{BRACKET_PASTE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
@@ -657,6 +674,7 @@ class Screen:
                 sys.stdout.write(f'{CUR_SHOW}{CURSOR_BAR}')
             else:
                 sys.stdout.write(f'{CUR_SHOW}{CURSOR_BLOCK}')
+            self._place_live_cursor()
             sys.stdout.flush()
 
             while True:
@@ -689,6 +707,7 @@ class Screen:
                                                      self._state.cursor_row,
                                                      self._state.viewport_offset,
                                                      self._state.cursor_col)
+                        self._place_live_cursor()
                         sys.stdout.write(SYNC_END)
                         sys.stdout.flush()
                         self._write_pending = False
@@ -954,62 +973,123 @@ class Screen:
             self.pop_focus()
 
     def submit_request(self, request):
-        """hand a blocking UI request to the main thread and wait for its
-        result. safe to call from a non-UI thread (the LLM worker): the main
-        thread services it from inside prompt() (see _service_requests),
-        runs the matching overlay, and wakes us with the result. returns the
-        handler's result (e.g. a bool for a 'confirm' request), or None if
-        the screen is closed / no UI is available."""
+        """hand a UI request to the conversation and wait for its answer. the
+        request becomes a live ask element (see ask.py) appended to the
+        conversation, answered by the user in insert mode. from a non-UI
+        thread (the LLM worker) the main thread services it from inside
+        prompt() (see _service_requests) and we block on the answer; from the
+        main thread (a `:` command) there is no prompt loop running, so we
+        nest one and let finish_live abort it once the answer lands. returns
+        the element's result (a bool for 'confirm', ...), or None if the
+        screen is closed / the element was abandoned."""
         if self._closed:
             return None
         done = threading.Event()
         box = {}
         with self._req_lock:
             self._req_pending = (request, done, box)
-        done.wait()
+        if threading.current_thread() is not threading.main_thread():
+            done.wait()
+            return box.get('result')
+        self._live_nested = True
+        try:
+            self.prompt(self._current_prompt_msg)
+        finally:
+            self._live_nested = False
+            if self._live is not None:
+                self.finish_live()
         return box.get('result')
 
     def _service_requests(self):
-        """run any pending cross-thread UI request on the main thread.
-        called from prompt()'s input loop. runs the matching overlay, stores
-        the result, wakes the waiting thread, then restores the prompt
-        cursor so input resumes cleanly."""
+        """turn the pending cross-thread UI request into the live ask
+        element: append it to the conversation as its own block and hold it
+        until a key answers it (modes.py routes insert-mode keys to it).
+        called from prompt()'s input loop on the main thread."""
         with self._req_lock:
             pend = self._req_pending
             self._req_pending = None
         if pend is None: return
 
         request, done, box = pend
-        try:
-            kind = request.get('kind')
-            if kind == 'confirm':
-                box['result'] = self.prompt_approval_overlay(
-                    request.get('title', 'Allow this action?'),
-                    request.get('body', ''),
-                )
-            elif kind == 'select':
-                box['result'] = self.prompt_select_overlay(
-                    request.get('options', []),
-                    message=request.get('title', ''),
-                )
-            elif kind == 'text':
-                box['result'] = self.prompt_text_overlay(
-                    request.get('title', ''),
-                    default=request.get('default', ''),
-                    secret=request.get('secret', False),
-                )
-            else:
-                box['result'] = None
-        finally:
+        kind = request.get('kind')
+        if kind == 'confirm':
+            element = ConfirmAsk(request.get('title', 'Allow this action?'),
+                                 body=request.get('body', ''))
+        elif kind == 'select':
+            element = SelectAsk(request.get('title', ''), request.get('options', []))
+        elif kind == 'multiselect':
+            element = MultiAsk(request.get('title', ''),
+                               request.get('options', []),
+                               default=request.get('default', []))
+        elif kind == 'text':
+            element = TextAsk(request.get('title', ''),
+                              default=request.get('default', ''),
+                              secret=request.get('secret', False))
+        else:
+            box['result'] = None
             done.set()
+            return
 
-        # the overlay hid the cursor; bring it back for the live prompt.
-        if self._in_prompt:
-            cursor = CURSOR_BLOCK
-            if self._state.mode == Mode.INSERT:
-                cursor = CURSOR_BAR
-            sys.stdout.write(f'{CUR_SHOW}{cursor}')
-            sys.stdout.flush()
+        self._live = element
+        self._live_request = (done, box)
+        with self._render_lock:
+            self._start_block()
+            self._current_kind = self.ASK
+            self._buffer.append_text(self._live_text(element), gutter=self._kind_gutter(self.ASK))
+            self._live_seg = self._buffer.segment_count() - 1
+            total = self._buffer.line_count()
+            if self._state.auto_scroll:
+                self._state.viewport_offset = max(0, total - self._layout.content_rows)
+                self._state.cursor_row = max(0, total - 1)
+                self._new_content_below = False
+            else:
+                self._new_content_below = True
+            self._refresh_all()
+
+    def _live_text(self, element):
+        """the element rendered as one buffer segment."""
+        width = max(1, self._cols - len(ansi_strip(self._kind_gutter(self.ASK))))
+        return '\n'.join(element.lines(width)) + '\n'
+
+    def repaint_live(self):
+        """redraw the live element in place after a key it consumed."""
+        with self._render_lock:
+            self._buffer.replace_segment(self._live_seg, self._live_text(self._live))
+            if self._state.auto_scroll:
+                total = self._buffer.line_count()
+                self._state.viewport_offset = max(0, total - self._layout.content_rows)
+                self._state.cursor_row = max(0, total - 1)
+            self._refresh_all()
+
+    def finish_live(self):
+        """the live element answered (or was abandoned): paint its final
+        state, hand the result to the waiting request, free the slot. a
+        request nested from the main thread also gets its prompt() aborted."""
+        element = self._live
+        done, box = self._live_request
+        self._live = None
+        self._live_request = None
+        element.answered = True
+        with self._render_lock:
+            self._buffer.replace_segment(self._live_seg, self._live_text(element))
+            self._refresh_all()
+        box['result'] = element.result
+        done.set()
+        if self._live_nested:
+            self._prompt_abort = True
+
+    def _place_live_cursor(self):
+        """park the cursor inside the live element while insert mode is
+        answering it; render_input parked it in the input box before us."""
+        if self._live is None: return
+        if self._state.mode != Mode.INSERT: return
+        row_off, col = self._live.cursor
+        line = self._buffer.segment_start(self._live_seg) + row_off
+        vrow = line - self._state.viewport_offset
+        if vrow < 0 or vrow >= self._layout.content_rows: return
+        gutter_w = len(ansi_strip(self._kind_gutter(self.ASK)))
+        sys.stdout.write(cur_move(vrow + 1, min(gutter_w + col + 1, self._cols)))
+        sys.stdout.write(f'{CUR_SHOW}{CURSOR_BLOCK}')
 
     def _refresh_content(self):
         """re-render the content viewport area (and the widgets above it)."""
@@ -1124,6 +1204,7 @@ class Screen:
                                 cursor_col=self._state.cursor_col,
                                 widget_lines=self._widget_lines(),
                                 positioned_cells=self._positioned_cells())
+        self._place_live_cursor()
         sys.stdout.write(SYNC_END)
         sys.stdout.flush()
 

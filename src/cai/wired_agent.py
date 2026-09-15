@@ -131,6 +131,23 @@ class WireUI(BaseUI):
             return options[value]
         return BaseUI.select(self, message, options, default=default, detail=detail)
 
+    def multiselect(self, message, options, *, default=(), detail=""):
+        options = list(options)
+        answered, value = self._prompt("multiselect",
+                                       message,
+                                       options=options,
+                                       default=list(default),
+                                       detail=detail)
+        if not answered:
+            return BaseUI.multiselect(self, message, options, default=default, detail=detail)
+        if not isinstance(value, list):
+            return BaseUI.multiselect(self, message, options, default=default, detail=detail)
+        chosen = []
+        for option in options:
+            if option not in value: continue
+            chosen.append(option)
+        return chosen
+
     def text(self, message, *, default="", secret=False):
         answered, value = self._prompt("text", message, default=default, secret=secret)
         if not answered:

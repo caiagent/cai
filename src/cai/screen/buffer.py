@@ -90,11 +90,24 @@ class ContentBuffer:
         self._seg_lines.pop()
 
     def _replace_last_segment(self, text):
-        prev_seg_lines = self._seg_lines[-1]
-        self._raw_segments[-1] = text
-        new_wrapped = self._wrap_segment(text, self._gutters[-1])
-        self._lines = self._lines[:len(self._lines) - prev_seg_lines] + new_wrapped
-        self._seg_lines[-1] = len(new_wrapped)
+        self.replace_segment(len(self._raw_segments) - 1, text)
+
+    def segment_count(self):
+        return len(self._raw_segments)
+
+    def segment_start(self, index):
+        """the display line index where segment `index` starts."""
+        return sum(self._seg_lines[:index])
+
+    def replace_segment(self, index, text):
+        """swap one segment's text in place, rewrapping just its lines - how
+        a live ask element redraws where it sits in the conversation."""
+        start = self.segment_start(index)
+        old = self._seg_lines[index]
+        self._raw_segments[index] = text
+        wrapped = self._wrap_segment(text, self._gutters[index])
+        self._lines[start:start + old] = wrapped
+        self._seg_lines[index] = len(wrapped)
 
     def _wrap_segment(self, seg, gutter=''):
         # a trailing '\n' means "next write starts a new row", not "emit an

@@ -9,12 +9,20 @@ special-casing "no human is reachable".
 This is the inbound prompt surface only. Outbound telemetry is cai.events (the
 Event stream a Run yields), and serving a UI over a socket is a later layer.
 Agent/Run take a ui= object and thread it down to call_llm, which stamps it on
-every HookContext; with no ui in scope the loop falls back to NULL_UI."""
+every HookContext; with no ui in scope the loop falls back to NULL_UI.
+
+current_ui() is the same surface for code that has no ctx in hand: a function
+tool, a hook, a `:`-command - anything running in the agent's own process - reads
+the UI the run/command is being driven from. the loop publishes it around tool
+dispatch, HooksRegistry.fire around every hook, the tui around every command.
+an MCP server is another process, so it sees NULL_UI until a bridge hands the
+object over."""
 from __future__ import annotations
 
 import getpass
 import sys
 
+from contextvars import ContextVar
 from typing import Protocol, runtime_checkable
 
 
@@ -26,6 +34,7 @@ class UI(Protocol):
 
     def confirm(self, message, *, default=False, detail=""): ...
     def select(self, message, options, *, default=None, detail=""): ...
+    def multiselect(self, message, options, *, default=(), detail=""): ...
     def text(self, message, *, default="", secret=False): ...
     def notify(self, message, *, level="info"): ...
     def status(self, message): ...
@@ -47,6 +56,13 @@ class BaseUI:
         if isinstance(default, int) and 0 <= default < len(options):
             return options[default]
         return default
+
+    def multiselect(self, message, options, *, default=(), detail=""):
+        chosen = []
+        for option in options:
+            if option not in default: continue
+            chosen.append(option)
+        return chosen
 
     def text(self, message, *, default="", secret=False):
         return None
@@ -105,6 +121,32 @@ class TerminalUI(BaseUI):
             return options[index]
         return BaseUI.select(self, message, options, default=default, detail=detail)
 
+    def multiselect(self, message, options, *, default=(), detail=""):
+        options = list(options)
+        if not self.interactive or not options:
+            return BaseUI.multiselect(self, message, options, default=default, detail=detail)
+        if detail:
+            sys.stderr.write(f"{detail}\n")
+        sys.stderr.write(f"{message}\n")
+        for i, option in enumerate(options):
+            mark = " "
+            if option in default:
+                mark = "x"
+            sys.stderr.write(f"  [{mark}] {i + 1}. {option}\n")
+        sys.stderr.flush()
+        answer = self._ask("numbers, comma separated> ", "")
+        if answer is None or answer.strip() == "":
+            return BaseUI.multiselect(self, message, options, default=default, detail=detail)
+        chosen = []
+        for part in answer.split(","):
+            part = part.strip()
+            if not part.isdigit(): continue
+            index = int(part) - 1
+            if index < 0 or index >= len(options): continue
+            if options[index] in chosen: continue
+            chosen.append(options[index])
+        return chosen
+
     def text(self, message, *, default="", secret=False):
         if not self.interactive:
             return None
@@ -145,3 +187,22 @@ class TerminalUI(BaseUI):
 
 # the UI used when a hook fires with no frontend in scope (the headless path).
 NULL_UI = BaseUI()
+
+_current_ui = ContextVar("cai_current_ui", default=NULL_UI)
+
+
+def current_ui():
+    """the UI of the run/command driving this thread - NULL_UI outside one. the
+    one accessor a tool, hook or command uses to reach the human."""
+    return _current_ui.get()
+
+
+def set_ui(ui):
+    """publish `ui` as current for this context; returns a token for reset_ui."""
+    if ui is None:
+        ui = NULL_UI
+    return _current_ui.set(ui)
+
+
+def reset_ui(token):
+    _current_ui.reset(token)

@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Mapping, Optional
 
 from cai.environment import Environment
-from cai.ui import UI, NULL_UI
+from cai.ui import UI, NULL_UI, reset_ui, set_ui
 
 
 log = logging.getLogger("cai")
@@ -112,13 +112,17 @@ class HooksRegistry:
 
     def fire(self, event, ctx):
         responses = []
-        for hook_event, fn in self._entries:
-            if hook_event != event: continue
-            try:
-                responses.append(fn(ctx))
-            except Exception:
-                log.exception("hook %r for %s raised",
-                              getattr(fn, '__name__', repr(fn)), event)
+        token = set_ui(ctx.ui)
+        try:
+            for hook_event, fn in self._entries:
+                if hook_event != event: continue
+                try:
+                    responses.append(fn(ctx))
+                except Exception:
+                    log.exception("hook %r for %s raised",
+                                  getattr(fn, '__name__', repr(fn)), event)
+        finally:
+            reset_ui(token)
         return responses
 
 

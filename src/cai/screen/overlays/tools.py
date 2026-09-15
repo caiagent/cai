@@ -1,7 +1,7 @@
-"""Interactive tools toggle overlay (alternate screen, floating box)."""
+"""Interactive tools toggle overlay (alternate screen, floating box). the list
+itself - cursor, checks, search - is a ToggleList; this file only frames it in
+a centered box and runs the key loop."""
 
-import os
-import re
 import select
 import shutil
 import signal
@@ -13,95 +13,11 @@ from ..ansi import (
     ALT_ENTER, ALT_EXIT,
     CUR_SHOW, CUR_HIDE,
     ERASE_SCREEN,
-    SGR_RESET, SGR_REVERSE, SGR_YELLOW, SGR_REVERSE_YELLOW,
+    SGR_RESET, SGR_REVERSE,
     cur_move,
-    KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
-    KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN,
 )
 from ..input import read_key, parse_mouse
-
-
-def _find_matches(tool_entries, pattern):
-    """search over tool names (first element of each entry tuple)."""
-    if not pattern:
-        return []
-    try:
-        rx = re.compile(pattern, re.IGNORECASE)
-    except re.error:
-        rx = re.compile(re.escape(pattern), re.IGNORECASE)
-    return [i for i, (nm, _origin) in enumerate(tool_entries) if rx.search(nm)]
-
-
-def _nearest_fwd(matches, from_idx):
-    for i, m in enumerate(matches):
-        if m >= from_idx:
-            return i
-    return 0
-
-
-def _nearest_bwd(matches, from_idx):
-    for i in range(len(matches) - 1, -1, -1):
-        if matches[i] <= from_idx:
-            return i
-    return len(matches) - 1
-
-
-def _sync_cursor(selected_idx, pre_search_idx, search_direction, search_matches):
-    """return (new_selected_idx, new_search_match_idx)."""
-    if not search_matches:
-        return pre_search_idx, -1
-    if search_direction == 1:
-        mi = _nearest_fwd(search_matches, pre_search_idx)
-    else:
-        mi = _nearest_bwd(search_matches, pre_search_idx)
-    return search_matches[mi], mi
-
-
-def _style_cell(cell, is_sel, is_match, color=None):
-    if is_sel and is_match:
-        return f'{SGR_REVERSE_YELLOW}{cell}{SGR_RESET}'
-    if is_sel:
-        return f'{SGR_REVERSE}{cell}{SGR_RESET}'
-    if is_match:
-        return f'{SGR_YELLOW}{cell}{SGR_RESET}'
-    if color:
-        return f'{color}{cell}{SGR_RESET}'
-    return cell
-
-
-def _build_status(search_mode,
-                  search_buf,
-                  search_direction,
-                  search_matches,
-                  search_match_idx,
-                  enabled_count,
-                  n,
-                  search_pattern,
-                  inner_w):
-    dir_char = '?'
-    if search_direction == 1:
-        dir_char = '/'
-
-    if search_mode:
-        search_text = ''.join(search_buf)
-        if search_matches:
-            m_info = f' [{search_match_idx + 1}/{len(search_matches)}]'
-        elif search_text:
-            m_info = ' [no match]'
-        else:
-            m_info = ''
-        return f' {dir_char}{search_text}{m_info}'
-
-    count_str = f' {enabled_count}/{n} enabled'
-    if search_pattern:
-        m_label = ''
-        if search_matches:
-            m_label = f' [{search_match_idx + 1}/{len(search_matches)}]'
-        count_str += f'   {dir_char}{search_pattern}{m_label}'
-    hints = '  j/k /:search ESC/↵:close'
-    if len(count_str) + len(hints) <= inner_w:
-        count_str += hints
-    return count_str
+from ..togglelist import ToggleList
 
 
 def _emit_diff(new_lines, prev_lines, start_c, first_draw):
@@ -121,37 +37,23 @@ def _emit_diff(new_lines, prev_lines, start_c, first_draw):
     return ''.join(out)
 
 
-def draw_tools_overlay(rows,
-                       cols,
-                       tool_entries,
-                       enabled,
-                       selected_idx,
-                       search_pattern,
-                       search_matches,
-                       search_match_idx,
-                       search_mode,
-                       search_buf,
-                       search_direction,
-                       prev_lines,
-                       first_draw):
-    """render the centered floating tools overlay (pure draw, no event loop)."""
-    n = len(tool_entries)
-
+def _box_geometry(rows, cols):
+    """(inner_w, visible_n, start_r, start_c) of the centered box."""
     inner_w = max(20, int(cols * 0.95) - 2)
     box_w = inner_w + 2
-
     overhead = 4
     max_box_h = max(overhead + 1, int(rows * 0.95))
     visible_n = max_box_h - overhead
     box_h = visible_n + overhead
-
     start_r = max(1, (rows - box_h) // 2 + 1)
     start_c = max(1, (cols - box_w) // 2 + 1)
+    return inner_w, visible_n, start_r, start_c
 
-    scroll = 0
-    if selected_idx >= visible_n:
-        scroll = selected_idx - visible_n + 1
-    scroll = max(0, min(scroll, n - visible_n))
+
+def draw_tools_overlay(rows, cols, lst, prev_lines, first_draw, title=''):
+    """render the centered floating box around a ToggleList (pure draw, no
+    event loop)."""
+    inner_w, visible_n, start_r, start_c = _box_geometry(rows, cols)
 
     H = '─'
     TL = '┌'
@@ -170,44 +72,18 @@ def draw_tools_overlay(rows,
         if 1 <= r <= rows:
             new_lines[row_off] = (r, text)
 
-    put(0, f'{TL}{h_line}{TR}')
+    top = h_line
+    if title:
+        top = f'{H} {title} '[:inner_w].ljust(inner_w, H)
+    put(0, f'{TL}{top}{TR}')
 
-    for i in range(visible_n):
-        ai = i + scroll
-        if ai >= n:
-            put(1 + i, f'{VL}{" " * inner_w}{VL}')
-            continue
-        nm, origin = tool_entries[ai]
-        check = '[ ]'
-        if nm in enabled:
-            check = '[x]'
-        origin_tag = f'[{origin}]'
-        # prefix "  [x] " = 6 chars, gap between name and tag = 2, tag itself
-        max_nm_len = max(1, inner_w - 6 - 2 - len(origin_tag))
-        nm_padded = nm[:max_nm_len].ljust(max_nm_len)
-        raw_line = f'  {check} {nm_padded}  {origin_tag}'
-        cell = raw_line[:inner_w].ljust(inner_w)
-        is_sel = (ai == selected_idx)
-        is_match = bool(search_matches) and (ai in search_matches)
-        put(1 + i, f'{VL}{_style_cell(cell, is_sel, is_match)}{VL}')
+    for i, row in enumerate(lst.rows(inner_w, visible_n)):
+        put(1 + i, f'{VL}{row}{VL}')
 
     put(1 + visible_n, f'{ML}{h_line}{MR}')
 
-    enabled_count = 0
-    for nm, _origin in tool_entries:
-        if nm not in enabled: continue
-        enabled_count += 1
-    raw_status = _build_status(search_mode,
-                               search_buf,
-                               search_direction,
-                               search_matches,
-                               search_match_idx,
-                               enabled_count,
-                               n,
-                               search_pattern,
-                               inner_w)
-    status_cell = raw_status[:inner_w].ljust(inner_w)
-    if search_mode:
+    status_cell = lst.status(inner_w)[:inner_w].ljust(inner_w)
+    if lst.search_mode:
         put(1 + visible_n + 1, f'{VL}{SGR_REVERSE}{status_cell}{SGR_RESET}{VL}')
     else:
         put(1 + visible_n + 1, f'{VL}{status_cell}{VL}')
@@ -216,8 +92,8 @@ def draw_tools_overlay(rows,
 
     out = _emit_diff(new_lines, prev_lines, start_c, first_draw)
 
-    if search_mode:
-        search_text = ''.join(search_buf)
+    if lst.search_mode:
+        search_text = ''.join(lst.search_buf)
         cursor_col = start_c + 1 + 1 + 1 + len(search_text)
         cursor_row = start_r + 1 + visible_n + 1
         out += f'{CUR_SHOW}{cur_move(cursor_row, cursor_col)}'
@@ -228,7 +104,7 @@ def draw_tools_overlay(rows,
     sys.stdout.flush()
 
 
-def prompt_tools_overlay(screen, tool_entries, enabled):
+def prompt_tools_overlay(screen, tool_entries, enabled, title=''):
     """interactive tools toggle overlay.
 
     tool_entries : list of (name, origin_label) tuples
@@ -242,15 +118,7 @@ def prompt_tools_overlay(screen, tool_entries, enabled):
     if not tool_entries:
         return set(enabled)
 
-    enabled = set(enabled)
-    selected_idx = 0
-    search_mode = False
-    search_direction = 1
-    search_buf = []
-    search_pattern = ''
-    search_matches = []
-    search_match_idx = -1
-    pre_search_idx = 0
+    lst = ToggleList(tool_entries, enabled)
     prev_lines = {}
     first_draw = [True]
     resize_pending = [False]
@@ -262,13 +130,7 @@ def prompt_tools_overlay(screen, tool_entries, enabled):
         first_draw[0] = True
 
     def _redraw():
-        draw_tools_overlay(
-            screen._rows, screen._cols,
-            tool_entries, enabled, selected_idx,
-            search_pattern, search_matches, search_match_idx,
-            search_mode, search_buf, search_direction,
-            prev_lines, first_draw[0],
-        )
+        draw_tools_overlay(screen._rows, screen._cols, lst, prev_lines, first_draw[0], title=title)
         first_draw[0] = False
 
     old_attrs = termios.tcgetattr(screen._tty_fd)
@@ -281,7 +143,6 @@ def prompt_tools_overlay(screen, tool_entries, enabled):
         tty.setraw(screen._tty_fd)
         _redraw()
 
-        prev_key = ''
         while True:
             if resize_pending[0]:
                 resize_pending[0] = False
@@ -298,38 +159,20 @@ def prompt_tools_overlay(screen, tool_entries, enabled):
                 action, _button, mcol, mrow = mouse
                 n = len(tool_entries)
                 if action == 'wheel_up':
-                    selected_idx = max(0, selected_idx - 1)
+                    lst.selected_idx = max(0, lst.selected_idx - 1)
                 elif action == 'wheel_down':
-                    selected_idx = min(max(0, n - 1), selected_idx + 1)
+                    lst.selected_idx = min(max(0, n - 1), lst.selected_idx + 1)
                 elif action == 'press':
                     idx = overlay_click_index(screen._rows, screen._cols, n,
-                                              selected_idx, mrow, mcol)
+                                              lst.selected_idx, mrow, mcol)
                     if idx is not None:
-                        selected_idx = idx
+                        lst.selected_idx = idx
                 _redraw()
                 continue
 
-            if search_mode:
-                search_mode, selected_idx, search_pattern, search_buf, \
-                    search_matches, search_match_idx = _handle_search_key(
-                        key, tool_entries, search_mode, selected_idx,
-                        search_pattern, search_buf, search_matches,
-                        search_match_idx, pre_search_idx, search_direction,
-                    )
-                _redraw()
-                continue
-
-            done, selected_idx, search_mode, search_direction, search_buf, \
-                search_pattern, search_matches, search_match_idx, \
-                pre_search_idx = _handle_normal_key(
-                    key, prev_key, tool_entries, enabled,
-                    selected_idx, search_matches, search_match_idx,
-                    search_direction, search_pattern,
-                    screen._rows,
-                )
-            if done:
+            _inner_w, visible_n, _start_r, _start_c = _box_geometry(screen._rows, screen._cols)
+            if lst.handle_key(key, page=visible_n // 2):
                 break
-            prev_key = key
             _redraw()
 
     finally:
@@ -338,125 +181,4 @@ def prompt_tools_overlay(screen, tool_entries, enabled):
         sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
         sys.stdout.flush()
 
-    return enabled
-
-
-def _handle_search_key(key,
-                       tool_entries,
-                       search_mode,
-                       selected_idx,
-                       search_pattern,
-                       search_buf,
-                       search_matches,
-                       search_match_idx,
-                       pre_search_idx,
-                       search_direction):
-    """handle one key in search input mode. returns updated search state tuple."""
-    if key in KEY_ENTER:
-        return (False, selected_idx, search_pattern, search_buf,
-                search_matches, search_match_idx)
-
-    if key == KEY_ESC:
-        return (False, pre_search_idx, '', [],  [], -1)
-
-    if key == KEY_BACKSPACE:
-        if search_buf:
-            search_buf = search_buf[:-1]
-            search_pattern = ''.join(search_buf)
-            search_matches = _find_matches(tool_entries, search_pattern)
-            selected_idx, search_match_idx = _sync_cursor(
-                selected_idx, pre_search_idx,
-                search_direction, search_matches,
-            )
-        else:
-            return (False, pre_search_idx, '', [], [], -1)
-        return (True, selected_idx, search_pattern, search_buf,
-                search_matches, search_match_idx)
-
-    if len(key) == 1 and ord(key) >= 32:
-        search_buf = search_buf + [key]
-        search_pattern = ''.join(search_buf)
-        search_matches = _find_matches(tool_entries, search_pattern)
-        selected_idx, search_match_idx = _sync_cursor(
-            selected_idx, pre_search_idx,
-            search_direction, search_matches,
-        )
-
-    return (True, selected_idx, search_pattern, search_buf,
-            search_matches, search_match_idx)
-
-
-def _handle_normal_key(key,
-                       prev_key,
-                       tool_entries,
-                       enabled,
-                       selected_idx,
-                       search_matches,
-                       search_match_idx,
-                       search_direction,
-                       search_pattern,
-                       rows):
-    """handle one key in normal navigation mode.
-    returns (done, selected_idx, search_mode, search_direction, search_buf,
-             search_pattern, search_matches, search_match_idx, pre_search_idx)."""
-    n = len(tool_entries)
-    done = False
-    search_mode = False
-    search_buf = []
-    pre_search_idx = selected_idx
-
-    if key in (KEY_ESC, *KEY_ENTER, KEY_CTRL_C):
-        done = True
-
-    elif key in (KEY_UP, 'k'):
-        selected_idx = max(0, selected_idx - 1)
-
-    elif key in (KEY_DOWN, 'j'):
-        selected_idx = min(n - 1, selected_idx + 1)
-
-    elif key == ' ':
-        nm = tool_entries[selected_idx][0]
-        if nm in enabled:
-            enabled.discard(nm)
-        else:
-            enabled.add(nm)
-
-    elif key in ('/', '?'):
-        search_mode = True
-        search_direction = -1
-        if key == '/':
-            search_direction = 1
-        search_buf = []
-        search_pattern = ''
-        search_matches = []
-        search_match_idx = -1
-        pre_search_idx = selected_idx
-
-    elif key == 'n' and search_matches:
-        step = search_direction
-        search_match_idx = (search_match_idx + step) % len(search_matches)
-        selected_idx = search_matches[search_match_idx]
-
-    elif key == 'N' and search_matches:
-        step = -search_direction
-        search_match_idx = (search_match_idx + step) % len(search_matches)
-        selected_idx = search_matches[search_match_idx]
-
-    elif key == 'G':
-        selected_idx = n - 1
-
-    elif key == 'g' and prev_key == 'g':
-        selected_idx = 0
-
-    elif key == KEY_CTRL_U:
-        overhead = 4
-        vis = max(5, int(rows * 0.95)) - overhead
-        selected_idx = max(0, selected_idx - max(1, vis // 2))
-
-    elif key == KEY_CTRL_D:
-        overhead = 4
-        vis = max(5, int(rows * 0.95)) - overhead
-        selected_idx = min(n - 1, selected_idx + max(1, vis // 2))
-
-    return (done, selected_idx, search_mode, search_direction, search_buf,
-            search_pattern, search_matches, search_match_idx, pre_search_idx)
+    return lst.checked

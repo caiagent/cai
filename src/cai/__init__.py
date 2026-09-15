@@ -23,6 +23,7 @@ logging.basicConfig(
 )
 
 from cai.paths import safe_path, scratch_dir
+from cai.ui import current_ui
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall, hook
 from cai.commands import Command, CommandContext, command
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 __all__ = [
     "safe_path",
     "scratch_dir",
+    "current_ui",
     "Event",
     "EventType",
     "HookContext",

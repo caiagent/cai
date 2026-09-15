@@ -36,7 +36,7 @@ from ..ansi import (
 )
 from ..input import read_key, parse_mouse
 from .model import _draw_model_overlay, _filter_and_sort, overlay_click_index
-from .tools import _find_matches, _handle_search_key
+from ..togglelist import _find_matches, _handle_search_key
 
 _REFRESH = 0.5   # seconds between data refreshes while the view is open
 

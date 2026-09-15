@@ -30,7 +30,7 @@ import threading
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, RunGate, ToolCall
 from cai.hooks import reset_gate, set_gate
-from cai.ui import NULL_UI
+from cai.ui import NULL_UI, reset_ui, set_ui
 
 
 log = logging.getLogger("cai")
@@ -287,6 +287,7 @@ def _handle_tool_calls(calls,
                    usage=usage,
                    hooks_data=hooks_data)
     token = set_gate(gate)
+    ui_token = set_ui(ui)
     try:
         for call in calls:
             call_id = call['id']
@@ -351,6 +352,7 @@ def _handle_tool_calls(calls,
                                     data=_merge_data(hooks_data))
             hooks.fire(HookEvent.AFTER_TOOL_CALL, after_ctx)
     finally:
+        reset_ui(ui_token)
         reset_gate(token)
 
 
