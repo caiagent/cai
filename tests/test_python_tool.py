@@ -53,10 +53,17 @@ def test_python_registered_unselected_until_the_skill():
         agent.close()
 
 
-def test_python_skill_selects_the_tool():
+def test_python_skills_select_the_tool():
+    agent = Agent(model="m", api=object(), skills=["python-read-only"])
+    try:
+        assert "python" in agent.tools
+    finally:
+        agent.close()
+    # the read-write skill layers on the read-only one, like fs on fs-read-only
     agent = Agent(model="m", api=object(), skills=["python"])
     try:
         assert "python" in agent.tools
+        assert "python-read-only" in agent.skills
     finally:
         agent.close()
 
@@ -170,10 +177,6 @@ def test_reads_allowed_writes_confined_to_scratch(tmp_path, monkeypatch):
 @pytest.mark.parametrize("snippet", [
     "open('/etc/hostname','w')",
     "open('/etc/hostname')",
-    "import ctypes",
-    "import cffi",
-    "import subprocess; subprocess.Popen(['ls'])",
-    "import os; os.system('ls')",
     "import socket; socket.socket().connect(('127.0.0.1', 9))",
     # directory enumeration outside the cwd is a read too - must not leak the tree
     "import os; os.listdir('/')",
@@ -228,9 +231,9 @@ def test_disallowed_paths_are_masked_inside_the_jail(tmp_path, monkeypatch):
     (tmp_path / "open.txt").write_text("public bytes")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CAI_DISALLOWED_PATHS", os.pathsep.join([str(secret), str(denied_file)]))
-    # exec mode: a spawned program sees only the kernel masks (no audit hook),
-    # so it proves the masks hold on their own
-    agent = _agent_with_skill("python-read-write-exec")
+    # a spawned program sees only the kernel masks (no audit hook), so it
+    # proves the masks hold on their own
+    agent = _agent_with_skill("python")
     # wrapped in markers: the tool renders empty stdout as "(no output)"
     sh = ("import subprocess; r = subprocess.run(['sh','-c',{cmd!r}],capture_output=True,text=True);"
           " print('<' + r.stdout.strip() + '>')")
@@ -311,7 +314,7 @@ def test_timeout(monkeypatch):
 
 STAT_PROBE = """import os
 try:
-    os.stat('/etc/passwd')
+    os.stat('/root')
     print('visible')
 except FileNotFoundError:
     print('hidden')
@@ -320,15 +323,15 @@ except FileNotFoundError:
 
 def test_kernel_jail_outside_paths_do_not_exist(tmp_path, monkeypatch):
     # the stat family emits no audit event - only the kernel jail hides this.
-    # /etc itself exists in the jail (a tmpfs dir carrying only ld.so.cache
-    # for the dynamic loader) - everything else in it must not.
+    # the system world (/usr, /etc, the loader dirs) is bound read-only for
+    # programs to run - everything else on the host must not exist.
     _fast_venv(monkeypatch)
     _force_sandbox(monkeypatch, "kernel")
     monkeypatch.chdir(tmp_path)
     agent = _agent_with_echo()
     try:
         assert _run(agent, STAT_PROBE).strip() == "hidden"
-        probe = "import os; print(os.path.exists('/etc/hostname'), os.path.exists('/root'))"
+        probe = "import os; print(os.path.exists('/home'), os.path.exists('/var'))"
         assert _run(agent, probe).strip() == "False False"
     finally:
         agent.close()
@@ -510,21 +513,16 @@ def _agent_with_skill(skill, scratch=None):
 
 
 def test_sandbox_mode_follows_the_active_skill():
-    agent = Agent(model="m", api=object(), skills=["python"])
+    agent = Agent(model="m", api=object(), skills=["python-read-only"])
     try:
         assert pytool.sandbox_mode(agent) == "read-only"
     finally:
         agent.close()
-    agent = _agent_with_skill("python-read-write")
+    # `python` layers on `python-read-only`; the wider active mode wins
+    agent = _agent_with_skill("python")
     try:
+        assert "python-read-only" in agent.skills
         assert pytool.sandbox_mode(agent) == "read-write"
-    finally:
-        agent.close()
-    # the widest active mode wins
-    agent = Agent(model="m", api=object(),
-                  skills=["python-read-write", "python-read-write-exec"])
-    try:
-        assert pytool.sandbox_mode(agent) == "read-write-exec"
     finally:
         agent.close()
 
@@ -538,7 +536,7 @@ def test_read_write_mode_writes_cwd_and_grants(tmp_path, monkeypatch):
     shared.mkdir()
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("CAI_ALLOWED_PATHS", str(shared))
-    agent = _agent_with_skill("python-read-write")
+    agent = _agent_with_skill("python")
     try:
         # cwd is writable now - the write lands on the real disk
         assert _run(agent, "open('new.txt','w').write('x'); print('ok')").strip() == "ok"
@@ -549,17 +547,15 @@ def test_read_write_mode_writes_cwd_and_grants(tmp_path, monkeypatch):
         assert (shared / "g.txt").read_text() == "y"
         # outside the write roots stays denied, with the mode's own message
         assert "writable roots" in _run(agent, "open('/etc/hostname','w')")
-        # subprocesses stay blocked below exec mode
-        assert "PermissionError" in _run(agent, "import subprocess; subprocess.Popen(['ls'])")
     finally:
         agent.close()
 
 
-def test_read_write_exec_runs_programs(tmp_path, monkeypatch):
+def test_read_write_runs_programs(tmp_path, monkeypatch):
     _fast_venv(monkeypatch)
     _force_sandbox(monkeypatch, "kernel")
     monkeypatch.chdir(tmp_path)
-    agent = _agent_with_skill("python-read-write-exec")
+    agent = _agent_with_skill("python")
     probe = """import subprocess
 r = subprocess.run(['/bin/sh', '-c', 'echo hello-from-sh'], capture_output=True, text=True)
 print(r.stdout.strip())
@@ -579,7 +575,7 @@ print(r.stdout.strip())
 """
     try:
         assert _run(agent, probe).strip() == "hello-from-sh"
-        # exec mode includes read-write: the spawned shell writes the cwd
+        # read-write covers spawned programs too: the shell writes the cwd
         assert _run(agent, write_probe).strip() == "landed"
         assert (tmp_path / "out.txt").read_text().strip() == "landed"
         # ...but outside the write roots the kernel answers EROFS, hooks or not
@@ -590,18 +586,18 @@ print(r.stdout.strip())
         agent.close()
 
 
-def test_exec_mode_hook_layer_allows_subprocess_and_ctypes(tmp_path, monkeypatch):
+def test_hook_layer_allows_subprocess_and_ctypes_in_read_only(tmp_path, monkeypatch):
     _fast_venv(monkeypatch)
     _force_sandbox(monkeypatch, "hook")
     monkeypatch.chdir(tmp_path)
-    agent = _agent_with_skill("python-read-write-exec")
+    agent = _agent_with_echo()
     probe = """import subprocess
 r = subprocess.run(['/bin/echo', 'ok'], capture_output=True, text=True)
 print(r.stdout.strip())
 """
     try:
         assert _run(agent, probe).strip() == "ok"
-        # in-process FFI blocking would be theater once binaries may run
+        # in-process FFI blocking would be theater when binaries may run
         assert _run(agent, "import ctypes; print('ctypes-ok')").strip() == "ctypes-ok"
     finally:
         agent.close()
@@ -618,13 +614,13 @@ def _alive(pid):
     return state != "Z"
 
 
-def test_exec_mode_daemon_is_swept_after_the_run(tmp_path, monkeypatch):
+def test_daemon_is_swept_after_the_run(tmp_path, monkeypatch):
     # the child leads its own session; the whole process group is killed when
     # the run ends, so a spawned daemon cannot outlive it.
     _fast_venv(monkeypatch)
     _force_sandbox(monkeypatch, "kernel")
     monkeypatch.chdir(tmp_path)
-    agent = _agent_with_skill("python-read-write-exec")
+    agent = _agent_with_echo()
     probe = """import subprocess
 p = subprocess.Popen(['sleep', '60'])
 print(p.pid)
@@ -808,3 +804,38 @@ def test_cli_python_subcommands_dispatch(monkeypatch):
     assert recorded == [("install", ["requests"]),
                         ("uninstall", ["requests"]),
                         ("list-packages", None)]
+
+
+def test_kernel_jail_cannot_signal_host_processes(tmp_path, monkeypatch):
+    # os.kill is not hook-gated - the pid namespace is what keeps a snippet from
+    # signalling cai (or anything else of the user's): host pids do not exist in
+    # there, and the snippet is pid 1 of its own namespace
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    probe = f"""import os
+try:
+    os.kill({os.getpid()}, 0)
+    print('reachable')
+except ProcessLookupError:
+    print('unreachable')
+print(os.getpid())
+"""
+    try:
+        assert _run(agent, probe).split() == ["unreachable", "1"]
+    finally:
+        agent.close()
+
+
+def test_kernel_jail_relays_exit_code_across_the_pid_namespace(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    try:
+        out = _run(agent, "import sys; print('bye'); sys.exit(3)")
+        assert "bye" in out
+        assert "[exit code 3]" in out
+    finally:
+        agent.close()

@@ -192,6 +192,25 @@ def test_esc_leaves_the_element_pending_and_i_returns():
     assert _plain_lines(screen)[-1] == "▌   -> x"
 
 
+def test_live_cursor_line_counts_wrapped_body_rows():
+    # a confirm detail longer than the width wraps into several buffer rows;
+    # the parked cursor must land on the yes/no row, not `logical index`
+    # rows below the segment start (which is a body row when it wrapped)
+    screen = FakeScreen()
+    screen.write("hello\n", kind=Screen.LLM)
+    body = "x" * 200
+    screen._req_pending = ({"kind": "confirm", "title": "Allow?", "body": body},
+                           threading.Event(), {})
+    screen._service_requests()
+    lines = _plain_lines(screen)
+    assert lines[-1] == "▌    yes    no "
+    assert len(lines) > 4                       # the body really wrapped
+    assert screen._live_cursor_line() == len(lines) - 1
+    modes = ModeHandler()
+    modes.handle_key(KEY_TAB, screen._state, screen)
+    assert screen._live_cursor_line() == len(lines) - 1
+
+
 def test_main_thread_request_nests_a_prompt_and_is_released():
     screen = FakeScreen()
     modes = ModeHandler()

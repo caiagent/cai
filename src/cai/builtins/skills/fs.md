@@ -23,4 +23,4 @@ Scratch directory:
 Discipline:
 - Read a file before editing; confirm the edit landed.
 - Make the smallest change that does the task; don't touch files that weren't part of the request.
-- All paths stay inside the working directory. Cite as `path/to/file.py:42`.
+- All paths stay inside the working directory, `$CAI_SCRATCH`, or the granted paths listed above. Cite as `path/to/file.py:42`.

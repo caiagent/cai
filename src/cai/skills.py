@@ -19,9 +19,11 @@ env.available_skills() lists it.
 
 A skill body may carry {{name}} slots - holes filled fresh on every read of
 system_prompt (once per turn), so a skill can push live state to the model
-instead of making it act to fetch it. {{tools}} is the one builtin (the
-currently selected tools' signatures); any other name resolves to a filler
-registered via the cai.slot decorator, called with a SlotContext:
+instead of making it act to fetch it. Two names are builtin: {{tools}} (the
+currently selected tools' signatures) and {{allowed_paths}} (the
+CAI_ALLOWED_PATHS grants, one per line, "(none)" without any); any other name
+resolves to a filler registered via the cai.slot decorator, called with a
+SlotContext:
 
     @cai.slot
     def notes(ctx):
@@ -38,13 +40,15 @@ import re
 import logging
 from dataclasses import dataclass
 
+from cai import paths
 from cai.environment import Environment
 
 
 log = logging.getLogger("cai")
 
 
-# a {{name}} hole in a skill body: the builtin {{tools}} or a cai.slot filler.
+# a {{name}} hole in a skill body: a builtin ({{tools}}, {{allowed_paths}}) or
+# a cai.slot filler.
 _SLOT_RE = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
 
 
@@ -82,6 +86,17 @@ class Skill:
     tools: list
     skills: list
     body: str
+
+
+def _allowed_paths_slot():
+    """fills {{allowed_paths}}: the CAI_ALLOWED_PATHS grants, one realpath'd
+    absolute path per line - the same list safe_path and the python jail
+    honour - or "(none)" when nothing is granted, so the skill text never
+    ends on a dangling colon."""
+    roots = paths.allowed_paths()
+    if not roots:
+        return "(none)"
+    return "\n".join(roots)
 
 
 def _skill_path(name, dirs):
@@ -241,14 +256,26 @@ class SkillsRegistry:
 
     def _fill_slots(self, body, skill_name):
         """replace every {{name}} hole in one skill's body: {{tools}} with the
-        currently selected tools' signatures, anything else with its cai.slot
-        filler's result. an unknown name fills empty (warned); a filler that
+        currently selected tools' signatures, {{allowed_paths}} with the
+        CAI_ALLOWED_PATHS grants, anything else with its cai.slot filler's
+        result. an unknown name fills empty (warned); a filler that
         raises fills with an error marker (logged), so one bad slot never
-        breaks the turn."""
+        breaks the turn. a multi-line result inherits the indentation of the
+        line carrying the hole, so a list slotted into a markdown bullet stays
+        inside the bullet."""
         def fill(match):
             name = match.group(1)
+            line_start = body.rfind("\n", 0, match.start()) + 1
+            indent = body[line_start:match.start()]
+            if indent.strip():
+                indent = ""
+            return _resolve(name).replace("\n", "\n" + indent)
+
+        def _resolve(name):
             if name == "tools":
                 return self.tools_registry.signatures()
+            if name == "allowed_paths":
+                return _allowed_paths_slot()
             filler = self.env.slot(name)
             if filler is None:
                 log.warning("skill %r: no slot filler for {{%s}}", skill_name, name)

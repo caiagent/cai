@@ -10,4 +10,8 @@ Workflow:
 - `fs__search` to locate symbols, strings, or patterns inside file contents (text and binary) — prefer specific patterns over broad ones.
 - `fs__read_file` with `line_start`/`line_end` for targeted ranges — avoid loading large files whole.
 
-All paths must stay inside the working directory. Cite every finding as `path/to/file.py:42`.
+All paths must stay inside the working directory, `$CAI_SCRATCH`, or these granted paths (a directory grants its subtree, a file just itself):
+
+{{allowed_paths}}
+
+Cite every finding as `path/to/file.py:42`.

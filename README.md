@@ -168,15 +168,17 @@ conversation plus the settings needed to resume it.
 - The `subagents` skill gives the agent launch / wait / list / kill tools;
   each child runs on its own unix socket with a reduce-only subset of the
   parent's tools.
-- The `python` skill gives the agent a `python(code, timeout=60)` tool that
+- The `python-read-only` skill gives the agent a `python(code, timeout=60)` tool that
   runs a snippet in a subprocess of a cai-managed virtualenv
   (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only;
   manage its packages with `cai python install|uninstall|list-packages`).
   The snippet is jailed at the **kernel level**: it enters fresh user + mount +
-  network namespaces and pivots onto a root containing only the working
+  network + pid namespaces and pivots onto a root containing only the working
   directory, the session scratch dir, the interpreter and the system library
-  dirs its C extensions load from — no other path exists, and there is no
-  network interface. The whole tree is mounted
+  dirs its C extensions load from — no other path exists, there is no
+  network interface, and no host process is addressable (the snippet is pid 1
+  of its own namespace, so it cannot signal cai or anything else of yours).
+  The whole tree is mounted
   **read-only except the scratch dir**, the one writable island. On top of
   that, a `sys.addaudithook` jail enforces the same policy: it can read files
   and list directories inside the jail but create, modify or delete only under
@@ -194,18 +196,18 @@ conversation plus the settings needed to resume it.
   `python_sandbox` key set to `"hook"` runs the audit-hook jail only, the
   container itself being the boundary. Any of these keys can also be set from
   `init.py` (`cai.settings.python_venv = "…"`), which shadows `config.json`.
-- The sandbox has three **modes**, granted by which python skill you activate
-  (so a sub-agent given plain `python` stays read-only while its parent runs a
-  wider one): `python` — read-only, writes under scratch only, as above;
-  `python-read-write` — writes also allowed under the working directory and
-  the `--allowed-paths` grants (the same policy the fs tools enforce, the
-  `--disallowed-paths` denies included);
-  `python-read-write-exec` — additionally allows running programs, the jail
-  then also carrying the system binary dirs read-only: a spawned process
-  inherits the namespaces, so it sees the same files, the same write roots and
-  no network, all kernel-enforced. No mode grants network. Under
-  `python_sandbox: "hook"` the exec mode's spawned programs are confined by
-  your container only.
+- The sandbox has two **modes**, granted by which python skill you activate
+  (so a sub-agent given `python-read-only` stays read-only while its parent
+  runs `python`): `python-read-only` — writes under scratch only, as above;
+  `python` — layered on it like `fs` on `fs-read-only`, writes also allowed
+  under the working directory and the `--allowed-paths` grants (the same
+  policy the fs tools enforce, the `--disallowed-paths` denies included).
+  Both may run programs: the jail
+  carries the system binary dirs read-only, and a spawned process inherits
+  the namespaces, so it sees the same files, the same write roots, no network
+  and no host pids, all kernel-enforced. No mode grants network. Under
+  `python_sandbox: "hook"` spawned programs are confined by your container
+  only.
 
 ## Extensions
 

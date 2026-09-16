@@ -158,3 +158,55 @@ def test_agent_wires_itself_into_slot_context(tmp_path):
         assert seen[0] is agent
     finally:
         agent.close()
+
+
+def test_allowed_paths_slot_fills_none_without_grants(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    env = _env_with_skill(tmp_path, "jail", "Granted:\n{{allowed_paths}}")
+
+    registry = _registry(env, "jail")
+    assert "Granted:\n(none)" in registry.system_prompt
+
+
+def test_allowed_paths_slot_lists_grants_realpathd(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(data)
+    note = tmp_path / "note.txt"
+    note.write_text("x")
+    spec = os.pathsep.join([str(link), str(note)])
+    monkeypatch.setenv("CAI_ALLOWED_PATHS", spec)
+    env = _env_with_skill(tmp_path, "jail", "Granted:\n{{allowed_paths}}")
+
+    registry = _registry(env, "jail")
+    expected = "Granted:\n" + os.path.realpath(str(data)) + "\n" + os.path.realpath(str(note))
+    assert expected in registry.system_prompt
+    assert str(link) not in registry.system_prompt
+
+
+def test_allowed_paths_slot_reads_fresh_every_turn(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    env = _env_with_skill(tmp_path, "jail", "{{allowed_paths}}")
+    registry = _registry(env, "jail")
+    assert "(none)" in registry.system_prompt
+
+    monkeypatch.setenv("CAI_ALLOWED_PATHS", str(tmp_path))
+    assert os.path.realpath(str(tmp_path)) in registry.system_prompt
+
+
+def test_multiline_slot_inherits_its_line_indent(tmp_path):
+    env = _env_with_skill(tmp_path, "memo", """\
+        - Items:
+
+          {{items}}
+
+        - Next
+        """)
+
+    def items(ctx):
+        return "one\ntwo"
+    env.register_slot(items)
+
+    registry = _registry(env, "memo")
+    assert "- Items:\n\n  one\n  two\n\n- Next" in registry.system_prompt

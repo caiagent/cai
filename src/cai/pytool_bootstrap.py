@@ -10,20 +10,24 @@ The kernel jail (default) pivots into a mount namespace where ONLY cwd +
 CAI_SCRATCH + the interpreter prefixes + the system library dirs the dynamic
 loader needs (LOADER_DIRS + ld.so.cache) exist - mounted READ-ONLY, except
 the write roots, which are re-bound read-write on top - inside an empty
-network namespace. The hook jail enforces the same policy in userspace:
+network namespace and a fresh pid namespace (the snippet is its pid 1: host
+processes are unaddressable, so it cannot signal cai or anything else of the
+user's, and when it exits the kernel reaps whatever it spawned). The hook jail
+enforces the same policy in userspace:
 reads (and directory listings) are confined to the same roots; writes are
 allowed under the write roots only and denied everywhere else, as are
-subprocess/exec/fork, sockets, ctypes and cffi. raw os.read/os.write on the
+sockets. raw os.read/os.write on the
 inherited fds emit no audit events and namespaces do not sever inherited
 fds, so tool_call() needs no exception in either jail.
 
-CAI_PY_MODE picks the write/exec policy: "read-only" (default) keeps the
-scratch dir the one writable island; "read-write" widens the write roots to
-the working directory and the CAI_ALLOWED_PATHS grants; "read-write-exec"
-additionally allows running programs - the jail then also carries the system
-binary dirs and the standard /dev nodes, and a spawned process inherits the
-namespaces, so it sees the same files, the same write roots and no network,
-kernel-enforced (audit hooks do not survive into an exec'd binary).
+CAI_PY_MODE picks the write policy: "read-only" (default) keeps the scratch
+dir the one writable island; "read-write" widens the write roots to the
+working directory and the CAI_ALLOWED_PATHS grants. Running programs (and
+in-process FFI via ctypes/cffi) is allowed in both: the jail carries the
+system binary dirs and the standard /dev nodes, and a spawned process
+inherits the namespaces, so it sees the same files, the same write roots, no
+network and no host pids, kernel-enforced (audit hooks do not survive into an
+exec'd binary, which is why nothing the kernel does not enforce is gated).
 
 CAI_DISALLOWED_PATHS entries are denied in every mode: the audit hook refuses
 them outright, and the kernel jail masks each one that a bound root would
@@ -75,6 +79,9 @@ def compute_write_roots():
     scratch = os.environ.get("CAI_SCRATCH", "")
     if scratch:
         roots.append(os.path.realpath(scratch))
+    # /dev/null is load-bearing for spawned programs (subprocess.DEVNULL,
+    # shell redirections) - a write root so its bind ends up read-write.
+    roots.append("/dev/null")
     if mode == "read-only":
         return roots
     cwd = os.path.realpath(os.getcwd())
@@ -85,10 +92,6 @@ def compute_write_roots():
         real = os.path.realpath(entry)
         if real in roots: continue
         roots.append(real)
-    # /dev/null is load-bearing for spawned programs (subprocess.DEVNULL,
-    # shell redirections) - a write root so its bind ends up read-write.
-    if mode == "read-write-exec":
-        roots.append("/dev/null")
     return roots
 
 
@@ -99,13 +102,17 @@ def compute_write_roots():
 # path outside scratch is writable at the kernel level, however the syscall is
 # issued. the fresh network namespace has no interfaces (not even loopback) so
 # there is no network, and abstract unix sockets are per-netns so they die
-# with it. inherited fds (stdin, the RPC pipes, the stdout tempfile) are
-# untouched - read-only mounts do not affect already-open fds. runs before
-# the audit hook exists, so its own opens/mkdirs are unrestricted.
+# with it. the fresh pid namespace takes effect for the NEXT child only, so
+# the jail ends by forking once: the child (pid 1 in there) runs the snippet,
+# the parent just waits and relays its exit status. inherited fds (stdin, the
+# RPC pipes, the stdout tempfile) are untouched - read-only mounts do not
+# affect already-open fds. runs before the audit hook exists, so its own
+# opens/mkdirs/fork are unrestricted.
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWNET = 0x40000000
+CLONE_NEWPID = 0x20000000
 MS_REC = 16384
 MS_PRIVATE = 1 << 18
 MS_BIND = 4096
@@ -134,11 +141,11 @@ PIVOT_ROOT_NR["aarch64"] = 41
 LOADER_DIRS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
 LOADER_CACHE = "/etc/ld.so.cache"
 
-# the exec world, carried only in read-write-exec mode: the system binary
-# dirs (so /bin/sh, git & co exist to be run) and /etc (tools read passwd,
-# certs, ...), all read-only - plus the standard /dev nodes programs assume
-# (/dev/null joins the write roots instead: it must be writable). /usr first
-# so the loader dirs under it fold away.
+# the exec world: the system binary dirs (so /bin/sh, git & co exist to be
+# run) and /etc (tools read passwd, certs, ...), all read-only - plus the
+# standard /dev nodes programs assume (/dev/null joins the write roots
+# instead: it must be writable). /usr first so the loader dirs under it fold
+# away.
 EXEC_DIRS = ("/usr", "/bin", "/sbin", "/etc")
 DEV_NODES = ("/dev/zero", "/dev/urandom", "/dev/random")
 
@@ -167,12 +174,9 @@ def bind_roots():
 
 def system_world():
     """the host dirs and files the jail must carry beyond the read roots: the
-    dynamic loader's world always; the exec world too when programs may run."""
-    dirs = LOADER_DIRS
-    files = (LOADER_CACHE,)
-    if mode == "read-write-exec":
-        dirs = EXEC_DIRS + LOADER_DIRS
-        files = ("/dev/null", LOADER_CACHE) + DEV_NODES
+    dynamic loader's world and the exec world."""
+    dirs = EXEC_DIRS + LOADER_DIRS
+    files = ("/dev/null", LOADER_CACHE) + DEV_NODES
     return dirs, files
 
 
@@ -210,7 +214,7 @@ def mask_denied(ctypes, libc, need, staging, kept, attr):
 
 
 def bind_system_world(libc, need, staging, kept):
-    """make dlopen (and, in exec mode, exec) work inside the jail: bind the
+    """make dlopen and exec work inside the jail: bind the
     system_world() dirs and files, skipping whatever a read root's recursive
     bind - or an earlier system dir - already carries. runs before the
     read-only flip, so these end up read-only like everything else (the
@@ -297,7 +301,8 @@ def enter_kernel_jail():
     gid = os.getgid()
     cwd = os.path.realpath(os.getcwd())
 
-    need(libc.unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET), "unshare")
+    need(libc.unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID),
+         "unshare")
 
     with open("/proc/self/setgroups", "w") as f:
         f.write("deny")
@@ -370,34 +375,33 @@ def enter_kernel_jail():
     need(libc.umount2(b".", MNT_DETACH), "detach old root")
     os.chdir(cwd)
     drop_caps(ctypes, libc, need)
-    # this bootstrap imported ctypes; evict it so the snippet's own import still
-    # hits the audit hook instead of the sys.modules cache.
-    for name in list(sys.modules):
-        if name == "_ctypes" or name == "ctypes" or name.startswith("ctypes."):
-            del sys.modules[name]
+    enter_pid_namespace()
+
+
+def enter_pid_namespace():
+    """the fork that lands in the pid namespace unshared above: the child
+    continues as its pid 1 and runs the snippet; this process waits for it and
+    exits with the same status (a signal death becomes 128+signum, the shell
+    convention). os._exit, so nothing buffered here is flushed twice. cai's
+    timeout kill still reaches both: process groups span pid namespaces."""
+    child = os.fork()
+    if child == 0:
+        return
+    _, status = os.waitpid(child, 0)
+    code = os.waitstatus_to_exitcode(status)
+    if code < 0:
+        code = 128 - code
+    os._exit(code)
 
 
 # --- hook jail: the read-only audit hook ------------------------------------
 
-# process creation and signalling - blocked except in read-write-exec mode,
-# where running programs is the point. ctypes/cffi (the FFI_MODULES import
-# block) lift with it: once arbitrary binaries may run, blocking in-process
-# FFI is theater, and the kernel jail is the boundary either way.
-PROCESS_BLOCKED = (
-    "subprocess.Popen",
-    "os.system",
-    "os.exec",
-    "os.spawn",
-    "os.posix_spawn",
-    "os.fork",
-    "os.forkpty",
-    "os.kill",
-    "os.killpg",
-    "pty.spawn",
-)
-
-# blocked in every mode: no mode grants network (the empty netns enforces it
-# in the kernel jail; here it is the friendly error).
+# process creation, signalling and in-process FFI are not gated here: the
+# kernel jail confines a spawned program (and a raw syscall) exactly as it
+# confines the snippet - same mounts, no network, no host pids - so a hook
+# block would be theater. what remains is the friendly error for what the
+# kernel enforces silently. sockets: no mode grants network (the empty netns
+# enforces it).
 NETWORK_BLOCKED = (
     "socket.getaddrinfo",
     "socket.gethostbyname",
@@ -407,8 +411,6 @@ NETWORK_BLOCKED = (
     "socket.sendto",
     "socket.sendmsg",
 )
-
-FFI_MODULES = ("ctypes", "_ctypes", "cffi", "_cffi_backend")
 
 WRITE_EVENTS = (
     "os.remove",
@@ -484,17 +486,7 @@ def write_denial(what):
 
 
 def check(event, args):
-    if event == "import":
-        if args[0] not in FFI_MODULES:
-            return
-        if mode == "read-write-exec":
-            return
-        raise PermissionError(f"cai sandbox: {args[0]} is blocked")
     if event in NETWORK_BLOCKED:
-        raise PermissionError(f"cai sandbox: {event} is blocked")
-    if event in PROCESS_BLOCKED:
-        if mode == "read-write-exec":
-            return
         raise PermissionError(f"cai sandbox: {event} is blocked")
     if event == "open":
         path, open_mode, flags = args

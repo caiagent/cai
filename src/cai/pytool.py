@@ -8,15 +8,17 @@ it). The sandbox is two layers, both set up by the child script
 (pytool_bootstrap.py, fed to the interpreter as `python -c` source text):
 
 KERNEL layer (the boundary; default, `python_sandbox: "kernel"`). Before the
-snippet runs, the child enters fresh user + mount + network namespaces and
-pivot_roots onto a tmpfs holding bind mounts of ONLY the interpreter prefixes,
+snippet runs, the child enters fresh user + mount + network + pid namespaces
+and pivot_roots onto a tmpfs holding bind mounts of ONLY the interpreter prefixes,
 the working directory, the session scratch dir and the system library dirs the
 dynamic loader needs (so stdlib C extensions like zlib can dlopen libz & co
 even when the interpreter is not /usr-based) - every other path does not
 exist, at the kernel level, no matter how the snippet issues the syscall (this
 also closes the stat-probe leak the audit hook alone had). The empty network
 namespace has no interfaces (not even loopback), so no network, and abstract
-unix sockets die with it too. The whole mount tree is flipped READ-ONLY
+unix sockets die with it too. The pid namespace makes host pids unaddressable:
+the snippet (its pid 1) cannot signal cai or any other process of the user's,
+though os.kill itself is allowed. The whole mount tree is flipped READ-ONLY
 (mount_setattr, kernel >= 5.12), then the scratch dir alone is re-bound
 read-write on top - the one writable island - before capabilities are
 dropped, so the snippet can neither write outside scratch nor rearrange its
@@ -37,14 +39,15 @@ seccomp/AppArmor) fail closed with a clear message; there the operator - whose
 container is then the boundary - may set `python_sandbox: "hook"` in
 config.json to run with the hook layer only.
 
-Which python skill is active picks the sandbox MODE (sandbox_mode): plain
-`python` is read-only as described above; `python-read-write` widens the
-write policy to cwd + the allowed-paths grants (matching safe_path exactly);
-`python-read-write-exec` additionally allows running programs - the jail
-then also carries the system binary dirs, and a spawned process inherits the
-namespaces: same files, same write roots, no network, kernel-enforced.
-Skills are chosen by the user/creator, never the model, so a mode is a
-user-side grant the model cannot widen.
+Which python skill is active picks the sandbox MODE (sandbox_mode):
+`python-read-only` is read-only as described above; `python` (layered on it,
+like `fs` on `fs-read-only`) widens the write policy to cwd + the
+allowed-paths grants (matching safe_path exactly).
+Both may run programs and use ctypes: the jail carries the system binary
+dirs read-only, and a spawned process inherits the namespaces - same files,
+same write roots, no network, no host pids, kernel-enforced - so a program
+can do nothing the snippet could not. Skills are chosen by the user/creator,
+never the model, so a mode is a user-side grant the model cannot widen.
 
 The snippet is also handed a `tool_call(name, **kwargs) -> str` builtin: it names one
 of the agent's OWN selected tools, and the call is dispatched IN the cai process
@@ -58,7 +61,7 @@ tool_call() channel is the one deliberate hole in the jail.
 
 The tool is bound to its Agent (like the sub-agent tools) - that is what gives
 tool_call() a live dispatch. It is registered on every agent but only offered to the
-model when the `python` skill selects it."""
+model when a python skill selects it."""
 
 import json
 import os
@@ -80,15 +83,13 @@ PY_TOOL_NAME = "python"
 
 
 def sandbox_mode(agent):
-    """the sandbox mode the agent's active python skill grants: `python` is
-    read-only (the default), `python-read-write` widens writes to cwd + the
-    allowed-paths grants, `python-read-write-exec` additionally allows running
-    programs. skills are chosen by the user/creator, never the model, so the
-    mode is a user-side grant; the widest active one wins."""
+    """the sandbox mode the agent's active python skill grants:
+    `python-read-only` is read-only (also the default with no python skill),
+    `python` widens writes to cwd + the allowed-paths grants. skills are
+    chosen by the user/creator, never the model, so the mode is a user-side
+    grant; the wider active one wins."""
     active = agent.skills
-    if "python-read-write-exec" in active:
-        return "read-write-exec"
-    if "python-read-write" in active:
+    if "python" in active:
         return "read-write"
     return "read-only"
 
@@ -211,7 +212,7 @@ def _handle_request(agent, line, rep_w):
 def _kill_tree(proc):
     """kill the child and everything it spawned: the child leads its own
     session (start_new_session), so its process group is the whole tree - an
-    exec-mode daemon or a timed-out grandchild can't outlive the run. a group
+    spawned daemon or a timed-out grandchild can't outlive the run. a group
     already gone raises, which is the good case."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -341,10 +342,10 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
 
     Sandbox: the tool can read files and list directories under the working
     directory, the session scratch dir (os.environ['CAI_SCRATCH']) and any
-    granted paths. What else it may do is the active python skill's mode:
-    read-only (the default) writes under scratch only; read-write also under
-    the working directory and granted paths; read-write-exec additionally
-    runs programs. No mode has network.
+    granted paths, and run programs (which see the same files). Where it may
+    write is the active python skill's mode: read-only (the default) under
+    scratch only; read-write also under the working directory and granted
+    paths. No mode has network.
 
     To change or perform anything the sandbox does not allow - use the
     provided dedicated tools.
@@ -370,6 +371,6 @@ def make_python(agent):
 
 def python_tools(agent):
     """the python tool(s) bound to `agent` - the agent-tools factory analog of
-    subagent_tools. registered unselected on every agent; the `python` skill
+    subagent_tools. registered unselected on every agent; a python skill
     selects it."""
     return [make_python(agent)]

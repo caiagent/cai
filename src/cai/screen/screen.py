@@ -31,7 +31,7 @@ from .ansi import (
     MOUSE_ON, MOUSE_OFF,
     BRACKET_PASTE_ON, BRACKET_PASTE_OFF,
     SYNC_START, SYNC_END,
-    cur_move, ansi_strip,
+    cur_move, ansi_strip, wrap_ansi,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer, GUTTER_GLYPH
@@ -1048,15 +1048,28 @@ class Screen:
         if self._live_nested:
             self._prompt_abort = True
 
+    def _live_cursor_line(self):
+        """the buffer line the live element's cursor sits on. the element's
+        cursor row counts its logical lines; the buffer wraps them (a long
+        confirm detail spans several rows), so the rows before it are wrapped
+        with the buffer's own width and wrapper and counted as display rows."""
+        gutter_w = len(ansi_strip(self._kind_gutter(self.ASK)))
+        width = max(1, self._cols - gutter_w)
+        row_off, _ = self._live.cursor
+        rows = 0
+        for text in self._live.lines(width)[:row_off]:
+            rows += len(wrap_ansi(text, width))
+        return self._buffer.segment_start(self._live_seg) + rows
+
     def _place_live_cursor(self):
         """park the cursor inside the live element while insert mode is
         answering it; render_input parked it in the input box before us."""
         if self._live is None: return
         if self._state.mode != Mode.INSERT: return
-        row_off, col = self._live.cursor
-        line = self._buffer.segment_start(self._live_seg) + row_off
+        line = self._live_cursor_line()
         vrow = line - self._state.viewport_offset
         if vrow < 0 or vrow >= self._layout.content_rows: return
+        _, col = self._live.cursor
         gutter_w = len(ansi_strip(self._kind_gutter(self.ASK)))
         sys.stdout.write(cur_move(vrow + 1, min(gutter_w + col + 1, self._cols)))
         sys.stdout.write(f'{CUR_SHOW}{CURSOR_BLOCK}')
