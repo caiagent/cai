@@ -38,6 +38,17 @@ def estimate_tokens(messages, sample_tokens=0, sample_chars=0):
     return round(chars / _CHARS_PER_TOKEN)
 
 
+def total_tokens(report):
+    """the turn's total from an api usage report: total_tokens when given,
+    else prompt + completion; 0 for an empty report."""
+    if not report:
+        return 0
+    tokens = report.get("total_tokens")
+    if tokens:
+        return tokens
+    return report.get("prompt_tokens", 0) + report.get("completion_tokens", 0)
+
+
 def fmt_ktok(n):
     """token count as a short 'kb' string, 1024-based (12345 -> '12kb')."""
     if not n:

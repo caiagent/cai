@@ -47,6 +47,28 @@ class FakeApi:
         return gen()
 
 
+class UsageApi(FakeApi):
+    """a FakeApi whose final chunk carries a usage report; each turn takes the
+    next total from `totals` (the last one repeats)."""
+
+    def __init__(self, chunks=None, totals=None):
+        FakeApi.__init__(self, chunks=chunks)
+        self.totals = list(totals or [0])
+
+    def chat(self, messages, model, **kwargs):
+        total = self.totals[0]
+        if len(self.totals) > 1:
+            self.totals.pop(0)
+        chunks = self.chunks
+        def gen():
+            for i, chunk in enumerate(chunks):
+                report = {}
+                if i == len(chunks) - 1:
+                    report["total_tokens"] = total
+                yield (chunk, None, None, report)
+        return gen()
+
+
 class ToolThenTextApi:
     """turn 1 asks for `tool_name`, turn 2 answers with text. records what it was
     handed on turn 2 so an injected steer turn can be asserted."""
@@ -308,6 +330,18 @@ def test_control_set_model_switches_the_model(serve):
     assert ok is True
     ok, info, error = wire.control("get_info")
     assert info["model"] == "new-model"
+
+
+def test_control_get_info_reports_the_last_turns_tokens(serve):
+    wire = serve(make_agent(api=UsageApi(chunks=["a", "b"], totals=[120, 340])))
+    ok, info, error = wire.control("get_info")
+    assert info["tokens"] == 0
+    run_turn(wire, "one")
+    ok, info, error = wire.control("get_info")
+    assert info["tokens"] == 120
+    run_turn(wire, "two")
+    ok, info, error = wire.control("get_info")
+    assert info["tokens"] == 340
 
 
 def test_control_get_available_tools_includes_a_registered_tool(serve):

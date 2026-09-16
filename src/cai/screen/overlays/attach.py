@@ -40,13 +40,15 @@ _PAINT_INTERVAL = 0.03
 
 
 def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
-                          kill_fn=None):
+                          kill_fn=None, ctx_fn=None):
     """full-screen read-only viewport over `view`, following its tail while
     drain_fn appends. watch is the socket select()ed next to the tty (None
     for an agent that already finished: pure scrollback); kill_fn()
-    interrupts the watched agent on Ctrl-K. returns None on ESC/q, or
-    'messages' on Ctrl-L - the caller opens the messages overlay (the two
-    overlays each own the terminal, so they cannot nest) and may re-enter."""
+    interrupts the watched agent on Ctrl-K; ctx_fn() is the watched agent's
+    context readout ('ctx 12% (...)') for the status row. returns None on
+    ESC/q, or 'messages' on Ctrl-L - the caller opens the messages overlay
+    (the two overlays each own the terminal, so they cannot nest) and may
+    re-enter."""
     alive = watch is not None and drain_fn is not None
     follow = True
     offset = 0
@@ -59,6 +61,11 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
         screen._rows, screen._cols = ts.lines, ts.columns
         resize_pending[0] = True
 
+    def _ctx():
+        if ctx_fn is None:
+            return ''
+        return ctx_fn()
+
     def _status_row():
         state = 'finished'
         hints = 'j/k:scroll G:tail ^L:messages ESC:back '
@@ -66,6 +73,9 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
             state = 'running'
             hints = 'j/k:scroll G:tail ^K:kill ^L:messages ESC:back '
         left = f' {title} · read-only · {state}'
+        ctx = _ctx()
+        if ctx:
+            left += f' · {ctx}'
         pad = max(1, screen._cols - len(left) - len(hints))
         bar = (left + ' ' * pad + hints)[:screen._cols]
         return f'{SGR_AZURE_ON_DGRAY}{bar}{SGR_RESET}'
@@ -91,10 +101,10 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
         out.append(SYNC_END)
         sys.stdout.write(''.join(out))
         sys.stdout.flush()
-        painted = (view.version, offset, rows, cols, alive)
+        painted = (view.version, offset, rows, cols, alive, _ctx())
 
     def _stale():
-        return painted != (view.version, offset, screen._rows, screen._cols, alive)
+        return painted != (view.version, offset, screen._rows, screen._cols, alive, _ctx())
 
     old_attrs = termios.tcgetattr(screen._tty_fd)
     orig_handler = signal.getsignal(signal.SIGWINCH)

@@ -309,6 +309,17 @@ class _Status:
             self._note = message or ""
             self._note_at = time.monotonic()
 
+    def limit_for(self, model):
+        """the context window of any model - the registry's cached
+        context_length, else the config fallback - for a readout about an
+        agent that is not this tui's own (the :agents attach view)."""
+        limit = None
+        if self._registry is not None:
+            limit = self._registry.context_length(model)
+        if limit:
+            return int(limit)
+        return self._fallback_limit
+
     def _resolve_limit(self):
         # cache the current model's context window (cache-only registry read),
         # falling back when it is unknown. caller manages locking.
@@ -439,6 +450,10 @@ class AgentClient:
 
     def get_messages(self):
         return self._call("get_messages") or []
+
+    def get_revision(self):
+        """the conversation's change counter (its length) - cheap to poll."""
+        return self._call("get_revision") or 0
 
     def set_messages(self, messages):
         self._call("set_messages", messages)
@@ -620,10 +635,7 @@ class _Worker(threading.Thread):
             self._on_usage(event)
 
     def _on_usage(self, event):
-        report = event.usage or {}
-        tokens = report.get("total_tokens")
-        if not tokens:
-            tokens = report.get("prompt_tokens", 0) + report.get("completion_tokens", 0)
+        tokens = usage.total_tokens(event.usage)
         if not tokens: return
         # the api's exact count - the official readout. also kept as the
         # calibration sample the :messages overlay uses for its per-message math.
@@ -673,18 +685,29 @@ class _Worker(threading.Thread):
 
 def _open_messages(screen, client, status):
     """open the :messages overlay over a snapshot of the conversation and write
-    back any edits, both over the wire."""
+    back any edits, both over the wire. while a run is in flight the overlay
+    opens read-only and follows the turn as it appends (set_messages is applied
+    between turns, so an edit made now would drop what the turn added)."""
     msgs = client.get_messages()
     if not msgs:
         screen.write("[no messages yet]\n", kind=Screen.META, block=True)
         return
     context_size, prompt_tokens, sample_chars = status.ctx_snapshot()
+    readonly = screen._busy
+    refetch = None
+    revision = None
+    if readonly:
+        refetch = client.get_messages
+        revision = client.get_revision
     edited, _estimate, modified = screen.prompt_messages_overlay(
         msgs,
         context_size=context_size,
         prompt_tokens=prompt_tokens,
-        sample_chars=sample_chars)
-    if modified:
+        sample_chars=sample_chars,
+        refetch=refetch,
+        revision=revision,
+        readonly=readonly)
+    if modified and not readonly:
         client.set_messages(edited)
 
 
@@ -1116,7 +1139,7 @@ def _agent_control(name, op):
     return value
 
 
-def _attach_agent(screen, node, cfg, stop_fn):
+def _attach_agent(screen, node, cfg, stop_fn, limit_fn=None):
     """watch one live agent from the :agents view: attach a read-only wire to
     its socket and mirror its conversation full-screen - the stored messages
     first (get_messages over a short-lived control connection), then the run's
@@ -1133,12 +1156,24 @@ def _attach_agent(screen, node, cfg, stop_fn):
     returns False when the socket is unreachable on the first attempt (the
     agent just finished), so the caller falls back to the scrollback attach
     view over the autosaved flow; an agent that dies during the messages
-    overlay ends the dive back at the tree instead."""
+    overlay ends the dive back at the tree instead. limit_fn(model) gives the
+    context window for the status row's ctx readout, whose token count starts
+    from get_info and follows the USAGE events streamed while attached."""
     from cai.agents_registry import AgentsRegistry
 
     name = node["id"]
     title = node.get("name") or name
     attached = False
+    limit = 0
+    if limit_fn is not None:
+        limit = limit_fn(node.get("model", ""))
+    tokens = {}
+    tokens["total"] = 0
+
+    def _ctx():
+        if not limit:
+            return ''
+        return usage.format_ctx(tokens["total"], limit)
     while True:
         try:
             channel = AgentsRegistry.connect(name)
@@ -1146,6 +1181,8 @@ def _attach_agent(screen, node, cfg, stop_fn):
             return attached
         stream = Wire(channel)
         snapshot = _agent_control(name, "get_messages")
+        info = _agent_control(name, "get_info") or {}
+        tokens["total"] = info.get("tokens", 0)
         view = _AttachView(screen._cols)
         _replay_messages(view, snapshot or [], cfg)
         transcript = _Transcript(view, cfg)
@@ -1160,7 +1197,10 @@ def _attach_agent(screen, node, cfg, stop_fn):
                 return False
             for msg in messages:
                 if msg.get("type") != Wire.EVENT: continue
-                transcript.event(Wire.event_from_dict(msg["event"]))
+                event = Wire.event_from_dict(msg["event"])
+                if event.type == EventType.USAGE:
+                    tokens["total"] = usage.total_tokens(event.usage)
+                transcript.event(event)
             return True
 
         def _kill():
@@ -1171,7 +1211,8 @@ def _attach_agent(screen, node, cfg, stop_fn):
                                                   title=title,
                                                   watch=channel,
                                                   drain_fn=_drain,
-                                                  kill_fn=_kill)
+                                                  kill_fn=_kill,
+                                                  ctx_fn=_ctx)
         finally:
             try:
                 channel.close()
@@ -1186,7 +1227,27 @@ def _attach_agent(screen, node, cfg, stop_fn):
         screen.prompt_messages_overlay(messages)
 
 
-def _open_agents(screen, client, cfg):
+_PREVIEW_MESSAGES = 40
+
+
+def _conversation_tail(messages, width, max_lines, cfg=None):
+    """the last max_lines rows of a conversation painted the way the attach
+    view paints it - what the :agents tree previews, so the pane shows exactly
+    what Enter opens. only the newest messages are replayed (rows above the
+    tail would be cut anyway), starting on a user or assistant turn so a tool
+    reply never opens the preview without its call."""
+    tail = messages
+    if len(messages) > _PREVIEW_MESSAGES:
+        tail = messages[-_PREVIEW_MESSAGES:]
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
+    view = _AttachView(width)
+    _replay_messages(view, tail, cfg)
+    total = view.line_count()
+    return view.get_lines(max(0, total - max_lines), max_lines)
+
+
+def _open_agents(screen, client, cfg, status=None):
     """open the live sub-agents tree, built solely from the agents sockets. each
     live agent answers get_info (name, model, the ids of its children); the tree
     is linked from those children lists, and a child with no live socket of its
@@ -1197,7 +1258,6 @@ def _open_agents(screen, client, cfg):
     the conversation, which is that very view."""
     from cai.agents_registry import AgentsRegistry
     from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
-    from cai.screen.render import _preview_lines
 
     self_name = client.get_info().get("name", "")
 
@@ -1270,7 +1330,7 @@ def _open_agents(screen, client, cfg):
             lines.append(f"{SGR_DIM_GRAY}no transcript{SGR_RESET}")
             return lines[:max_lines]
         body = max(1, max_lines - len(lines))
-        lines.extend(_preview_lines(messages, width, body))
+        lines.extend(_conversation_tail(messages, width, body, cfg))
         return lines[:max_lines]
 
     def _stop(name):
@@ -1302,7 +1362,10 @@ def _open_agents(screen, client, cfg):
             return
         if chosen["id"] == self_name:
             return
-        if chosen.get("live") and _attach_agent(screen, chosen, cfg, _stop):
+        limit_fn = None
+        if status is not None:
+            limit_fn = status.limit_for
+        if chosen.get("live") and _attach_agent(screen, chosen, cfg, _stop, limit_fn):
             continue
         messages = _messages_for(chosen)
         if messages is None:
@@ -1723,9 +1786,6 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, u
         _open_skills(screen, client, env.settings)
         return False
     if head == "messages":
-        if screen._busy:
-            screen.write("[busy — open :messages when idle]\n", kind=Screen.META, block=True)
-            return False
         _open_messages(screen, client, status)
         return False
     if head == "history":
@@ -1747,7 +1807,7 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, u
         _open_prompts(screen)
         return False
     if head == "agents":
-        _open_agents(screen, client, env.settings)
+        _open_agents(screen, client, env.settings, status)
         return False
     if head == "system":
         if screen._busy:

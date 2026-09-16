@@ -10,7 +10,7 @@ and drives the drain callback directly.
 """
 import threading
 
-from test_wired_agent import FakeApi, make_agent, run_turn_over
+from test_wired_agent import UsageApi, make_agent, run_turn_over
 
 from cai import channel
 from cai.environment import Settings
@@ -87,11 +87,13 @@ class _OverlayScreen:
         self.view = None
 
     def prompt_attach_overlay(self, view, *, title, watch=None, drain_fn=None,
-                              kill_fn=None):
+                              kill_fn=None, ctx_fn=None):
         self.view = view
+        self.ctx_before = ctx_fn()
         self._driver.send_submit("two")
-        while self._answer not in _plain_text(view):
+        while self._answer not in _plain_text(view) or ctx_fn() == self.ctx_before:
             assert drain_fn() is True
+        self.ctx_after = ctx_fn()
 
 
 def _patch_registry(tmp_path, monkeypatch):
@@ -106,7 +108,7 @@ def _patch_registry(tmp_path, monkeypatch):
 
 def test_attach_agent_mirrors_snapshot_then_live_stream(tmp_path, monkeypatch):
     sock_path = _patch_registry(tmp_path, monkeypatch)
-    agent = make_agent(api=FakeApi(chunks=["echo"]))
+    agent = make_agent(api=UsageApi(chunks=["echo"], totals=[100, 250]))
     served = UnixWiredAgent(agent, sock_path(agent.name))
     thread = threading.Thread(target=served.serve, daemon=True)
     thread.start()
@@ -121,7 +123,9 @@ def test_attach_agent_mirrors_snapshot_then_live_stream(tmp_path, monkeypatch):
         node["id"] = agent.name
         node["name"] = agent.name
         screen = _OverlayScreen(driver_wire, "> two")
-        assert _attach_agent(screen, node, Settings(), stops.append) is True
+        assert _attach_agent(screen, node, Settings(), stops.append, lambda model: 1000) is True
+        assert screen.ctx_before == "ctx 10% (100/1000)"
+        assert screen.ctx_after == "ctx 25% (250/1000)"
 
         text = _plain_text(screen.view)
         assert "> one" in text          # the snapshot, replayed before streaming
@@ -146,3 +150,41 @@ def test_attach_agent_falls_back_when_the_socket_is_gone(tmp_path, monkeypatch):
     node["id"] = "ghost"
     node["name"] = "ghost"
     assert _attach_agent(None, node, Settings(), None) is False
+
+
+# --------------------------------------------------------------------------
+# _conversation_tail: the :agents preview pane
+# --------------------------------------------------------------------------
+
+def test_conversation_tail_paints_like_the_attach_view():
+    from cai.tui import _conversation_tail
+
+    messages = [{"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello there"}]
+    lines = [ansi_strip(l) for l in _conversation_tail(messages, 40, 10)]
+    assert lines == ["▌ > hi", "", "▌ hello there"]
+    assert [ansi_strip(l) for l in _conversation_tail(messages, 40, 1)] == ["▌ hello there"]
+
+
+def test_conversation_tail_replays_only_the_newest_turns_from_a_user_turn():
+    from cai.tui import _conversation_tail, _PREVIEW_MESSAGES
+
+    messages = []
+    for i in range(_PREVIEW_MESSAGES):
+        messages.append({"role": "user", "content": f"old {i}"})
+    messages.append({"role": "tool", "tool_call_id": "t", "content": "orphan reply"})
+    messages.append({"role": "user", "content": "newest"})
+    lines = [ansi_strip(l) for l in _conversation_tail(messages, 40, 100)]
+    assert lines[-1] == "▌ > newest"
+    assert "orphan reply" not in "\n".join(lines)
+    assert "old 0" not in "\n".join(lines)
+    assert "old 1" in "\n".join(lines)
+
+
+def test_screen_wrapper_accepts_every_overlay_parameter():
+    import inspect
+    from cai.screen.overlays.attach import prompt_attach_overlay
+
+    wrapper = set(inspect.signature(Screen.prompt_attach_overlay).parameters) - {"self"}
+    overlay = set(inspect.signature(prompt_attach_overlay).parameters) - {"screen"}
+    assert wrapper == overlay

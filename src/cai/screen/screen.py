@@ -891,11 +891,12 @@ class Screen:
             self.pop_focus()
 
     def prompt_attach_overlay(self, view, *, title, watch=None, drain_fn=None,
-                              kill_fn=None):
+                              kill_fn=None, ctx_fn=None):
         """live read-only mirror of another agent's conversation (see
         overlays/attach.py). view holds the rendered lines; watch is the
         socket carrying the agent's event broadcast and drain_fn appends
-        what it receives; kill_fn() interrupts the agent on Ctrl-K."""
+        what it receives; kill_fn() interrupts the agent on Ctrl-K; ctx_fn()
+        is the agent's context readout for the status row."""
         from .overlays.attach import prompt_attach_overlay
 
         self.push_focus('attach')
@@ -905,7 +906,8 @@ class Screen:
                                          title=title,
                                          watch=watch,
                                          drain_fn=drain_fn,
-                                         kill_fn=kill_fn)
+                                         kill_fn=kill_fn,
+                                         ctx_fn=ctx_fn)
         finally:
             self.pop_focus()
 
@@ -923,7 +925,7 @@ class Screen:
 
     def prompt_messages_overlay(self, messages, *,
                                 context_size=0, prompt_tokens=0, sample_chars=0,
-                                refetch=None, revision=None):
+                                refetch=None, revision=None, readonly=False):
         """interactive messages overlay. see overlays/messages.py for docs."""
         from .overlays.messages import prompt_messages_overlay
 
@@ -935,40 +937,8 @@ class Screen:
                                            prompt_tokens=prompt_tokens,
                                            sample_chars=sample_chars,
                                            refetch=refetch,
-                                           revision=revision)
-        finally:
-            self.pop_focus()
-
-    def prompt_approval_overlay(self, title, body):
-        """blocking allow/deny confirmation. see overlays/approval.py."""
-        from .overlays.approval import prompt_approval_overlay
-
-        self.push_focus('approval')
-        try:
-            return prompt_approval_overlay(self, title, body)
-        finally:
-            self.pop_focus()
-
-    def prompt_select_overlay(self, options, message=""):
-        """blocking single-choice picker (reuses the fuzzy list overlay). returns
-        the chosen option or None on cancel. backs a hook's ctx.ui.select."""
-        from .overlays.model import prompt_model_overlay
-
-        self.push_focus('model')
-        try:
-            return prompt_model_overlay(self, list(options), presorted=True,
-                                        noun=message or "options", navigate=True)
-        finally:
-            self.pop_focus()
-
-    def prompt_text_overlay(self, title, default="", secret=False):
-        """blocking single-line text input. returns the entered string (an empty
-        entry yields default) or None on cancel. backs a hook's ctx.ui.text."""
-        from .overlays.textinput import prompt_text_overlay
-
-        self.push_focus('textinput')
-        try:
-            return prompt_text_overlay(self, title, default=default, secret=secret)
+                                           revision=revision,
+                                           readonly=readonly)
         finally:
             self.pop_focus()
 

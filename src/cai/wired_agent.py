@@ -527,6 +527,10 @@ class WiredAgent:
         if op == "kill":
             agent.kill()
             return True, None, None
+        if op == "get_revision":
+            # the conversation only grows mid-turn, so its length is a cheap
+            # change counter a live overlay can poll instead of refetching.
+            return True, len(agent.messages), None
         if op == "get_messages":
             # a snapshot: list() of a list is one atomic C-level copy under the
             # GIL, so a turn mutating - or strict.py shrinking - the live list
@@ -565,6 +569,7 @@ class WiredAgent:
             value["system_prompt"] = agent.system_prompt
             value["system_prompt_base"] = agent.system_prompt_base
             value["pending_steer"] = agent.steer_count()
+            value["tokens"] = agent.tokens
             return True, value, None
         if op == "clone":
             # swap the served agent for a fresh branch of itself: same socket,

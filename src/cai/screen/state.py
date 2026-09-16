@@ -345,7 +345,7 @@ class MsgOverlayCtx:
         'messages',
         # True once the user edits/deletes/forks in the overlay (vs the view
         # merely growing from live-sync); gates the write-back on close.
-        'modified',
+        'modified', 'readonly',
 
         # filter / view (view holds indices into messages)
         'view', 'selected_idx', 'scroll', 'forced_scroll',
@@ -393,6 +393,7 @@ class MsgOverlayCtx:
     def __init__(self, messages, context_size=0, prompt_tokens=0, sample_chars=0):
         self.messages = messages
         self.modified = False
+        self.readonly = False
 
         self.view = list(range(len(messages)))
         self.selected_idx = 0

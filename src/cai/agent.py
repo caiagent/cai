@@ -34,6 +34,7 @@ import tempfile
 import threading
 
 from cai import config
+from cai import usage
 from cai.api import OpenAiApi
 from cai.environment import Environment
 from cai.events import Event, EventType
@@ -169,6 +170,7 @@ class Agent:
     # constructed (tests build bare agents via __new__).
     _scratch = None
     _scratch_owned = False
+    tokens = 0
 
     def __init__(self,
                  *,
@@ -231,6 +233,7 @@ class Agent:
         self._run_lock = threading.Lock()
         self.messages = []
         self.children = []   # ids of the sub-agents launched this session
+        self.tokens = 0      # the last turn's usage total (what the conversation costs)
         # the session scratch directory: one place tools exchange binary/bulky
         # intermediates as files (handed to every local MCP spawn as
         # CAI_SCRATCH). scratch= is an existing directory to use instead of
@@ -459,6 +462,7 @@ class Agent:
             clone.messages = list(overrides["messages"] or [])
         else:
             clone.messages = copy.deepcopy(self.messages)
+            clone.tokens = self.tokens
         return clone
 
     def save(self, path=None):
@@ -640,30 +644,48 @@ class Agent:
                                     max_steps=self.max_steps,
                                     stream=False,
                                     hooks_data={"agent": self})
-                text = yield from enforce_strict_format(make_stream,
-                                                        strict_format,
-                                                        system_prompt,
-                                                        self.messages,
-                                                        interrupt=self.interrupt)
+                strict_stream = enforce_strict_format(make_stream,
+                                                      strict_format,
+                                                      system_prompt,
+                                                      self.messages,
+                                                      interrupt=self.interrupt)
+                text = yield from self._noting_usage(strict_stream)
                 return text
-            text = yield from call_llm(self.messages,
-                                       self.model,
-                                       self.api,
-                                       system_prompt=system_prompt,
-                                       tools=schemas,
-                                       tools_dispatch=dispatch,
-                                       hooks=hooks_registry,
-                                       ui=self._ui,
-                                       interrupt=self.interrupt,
-                                       steer=self._steer.drain,
-                                       reasoning_effort=self.reasoning_effort,
-                                       temperature=self.temperature,
-                                       max_steps=self.max_steps,
-                                       stream=stream,
-                                       hooks_data={"agent": self})
+            run_stream = call_llm(self.messages,
+                                  self.model,
+                                  self.api,
+                                  system_prompt=system_prompt,
+                                  tools=schemas,
+                                  tools_dispatch=dispatch,
+                                  hooks=hooks_registry,
+                                  ui=self._ui,
+                                  interrupt=self.interrupt,
+                                  steer=self._steer.drain,
+                                  reasoning_effort=self.reasoning_effort,
+                                  temperature=self.temperature,
+                                  max_steps=self.max_steps,
+                                  stream=stream,
+                                  hooks_data={"agent": self})
+            text = yield from self._noting_usage(run_stream)
             return text
         finally:
             self._run_lock.release()
+
+    def _noting_usage(self, stream):
+        """pass a run's events through, remembering each USAGE event's total as
+        self.tokens; returns what the stream returns (the final text). closing
+        this generator closes the stream, as a plain `yield from` would."""
+        try:
+            while True:
+                try:
+                    event = next(stream)
+                except StopIteration as stop:
+                    return stop.value
+                if event.type == EventType.USAGE:
+                    self.tokens = usage.total_tokens(event.usage)
+                yield event
+        finally:
+            stream.close()
 
     def run(self, prompt=None, *, strict_format=None):
         """return a handle over the agent's live conversation; iterating it

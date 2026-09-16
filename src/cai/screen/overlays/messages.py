@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import time
 import tty
 
 from ..ansi import (
@@ -38,6 +39,10 @@ from ..state import (
 )
 from ..input import read_key, parse_mouse, editor_argv
 
+
+# how often a live overlay asks the host whether the turn appended - a socket
+# round trip, so slower than the key loop's tick.
+_POLL_INTERVAL = 0.5
 
 _ROLE_COLOR = {
     'system':    SGR_MAGENTA,
@@ -107,6 +112,8 @@ def _build_status(ctx, nv, nm, inner_w, sel_count):
             m = f' [{ctx.search_match_idx + 1}/{len(ctx.search_matches)}]'
         pos_str += f'   {dir_char}{ctx.search_pattern}{m}'
     hints = '  Tab:fold  V:sel  d:del  !:rewrite  ESC:close'
+    if ctx.readonly:
+        hints = '  read-only (model running)  Tab:fold  ESC:close'
     if len(ansi_strip(pos_str)) + len(hints) <= inner_w:
         pos_str += hints
     return pos_str, False
@@ -558,6 +565,10 @@ def overlay_nav_key(ctx, key, rows, screen):
     sel = ctx.selected_idx
     half = _half_visible(rows)
 
+    if ctx.readonly and (key in ('d', 'p', '!') or key in KEY_ENTER):
+        ctx.status_flash = 'read-only while the model runs'
+        return None
+
     if key in (KEY_ESC, 'q', KEY_CTRL_C):
         if ctx.visual_mode:
             ctx.visual_mode = False
@@ -877,13 +888,14 @@ def _edit_in_editor(ctx, screen):
 
 def prompt_messages_overlay(screen, messages, *,
                             context_size=0, prompt_tokens=0, sample_chars=0,
-                            refetch=None, revision=None):
+                            refetch=None, revision=None, readonly=False):
     """interactive messages overlay.
     returns (messages, new_tokens_estimate, modified). modified is True when
     the user edited the conversation (so the caller writes it back).
     refetch (optional) returns the host's current messages; when the turn
     appends under the overlay it pulls the new tail in so the view live-
-    updates (see _live_sync)."""
+    updates (see _live_sync). readonly refuses every edit (delete, paste,
+    rewrite, editor) with a flash - the mode for browsing a running turn."""
     if not messages:
         return messages, 0, False
 
@@ -891,6 +903,7 @@ def prompt_messages_overlay(screen, messages, *,
                          context_size=context_size,
                          prompt_tokens=prompt_tokens,
                          sample_chars=sample_chars)
+    ctx.readonly = readonly
 
     old_attrs = termios.tcgetattr(screen._tty_fd)
     orig_handler = signal.getsignal(signal.SIGWINCH)
@@ -906,8 +919,10 @@ def prompt_messages_overlay(screen, messages, *,
     # for a change and flags dirty. None -> no live refresh (e.g. opened as a
     # sub-overlay with no client in scope).
     last_rev = None
+    last_poll = 0.0
     if revision is not None:
         last_rev = revision()
+        last_poll = time.monotonic()
 
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
@@ -921,7 +936,8 @@ def prompt_messages_overlay(screen, messages, *,
                 ctx.resize_pending = False
                 overlay_redraw(ctx, screen._rows, screen._cols)
 
-            if revision is not None:
+            if revision is not None and time.monotonic() - last_poll >= _POLL_INTERVAL:
+                last_poll = time.monotonic()
                 cur_rev = revision()
                 if cur_rev != last_rev:
                     last_rev = cur_rev
