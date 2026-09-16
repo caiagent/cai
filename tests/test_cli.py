@@ -40,6 +40,14 @@ def test_drive_respects_show_reasoning_off(monkeypatch, capsys):
     assert "answer" in out
 
 
+def test_version_prints_and_exits(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"cai {cli.cai_version()}"
+    assert cli.cai_version() != ""
+
+
 def test_line_by_line_needs_a_prompt():
     with pytest.raises(SystemExit):
         cli.main(["--line-by-line"])

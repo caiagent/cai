@@ -26,6 +26,7 @@ stdin/stdout behaviour:
 import os
 import argparse
 import sys
+from importlib.metadata import version, PackageNotFoundError
 
 # optional: real tab completion when argcomplete is installed (pip install
 # argcomplete). absent, the completer hooks below are simply never consulted.
@@ -180,10 +181,22 @@ def _add_python_subparser(sub):
                     "(created first if needed).")
 
 
+def cai_version():
+    """the installed cai version from the package metadata (pyproject's
+    `version`), or 'unknown' for a bare checkout on sys.path."""
+    try:
+        return version("cai")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="cai",
         description="Send a prompt to an LLM and stream the answer.")
+    parser.add_argument("--version",
+                        action="version",
+                        version=f"cai {cai_version()}")
     parser.add_argument("-p", "--prompt",
                         default=None,
                         help="the prompt to send (or pass it after '--')")
