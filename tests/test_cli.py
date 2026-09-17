@@ -66,3 +66,17 @@ def test_line_by_line_rejects_interactive():
 def test_cores_must_be_positive():
     with pytest.raises(SystemExit):
         cli.main(["--line-by-line", "-p", "x", "--cores", "0"])
+
+
+def test_diag_tool_call_renders_long_args_as_a_block(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_STDERR_TTY", True)
+    cli._diag_tool_call("fs__edit_file", {"file_path": "a.py", "old_text": "x\ny", "new_text": "z"})
+    err = capsys.readouterr().err
+    from cai.screen.ansi import ansi_strip
+    assert ansi_strip(err).splitlines() == ["  -> fs__edit_file(file_path=a.py, new_text=z)",
+                                            "    old_text:",
+                                            "      x",
+                                            "      y"]
+    monkeypatch.setattr(cli, "_STDERR_TTY", False)
+    cli._diag_tool_call("fs__edit_file", {"old_text": "x\ny"})
+    assert capsys.readouterr().err == ""

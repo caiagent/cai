@@ -135,8 +135,12 @@ carries its own reference.
 `cai` with no prompt (and a terminal attached) opens the full-screen
 interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
 session: `:models`, `:messages`, `:history`, `:sessions`, `:save`, `:load`,
-`:tools`, `:skills`, `:redraw` (repaint the view from the conversation, e.g.
-after flipping *show reasoning* in `:config`).
+`:tools`, `:skills`, `:status` (Tab: toggle a status panel over the
+conversation - model, active skills and tools, live sub-agents, pending
+counts - kept current while shown), `:pending` (Ctrl-Q: the steers and queued prompts
+waiting behind the running turn - Ctrl-K removes one before it runs; opens
+only when something is pending), `:redraw` (repaint the view from the
+conversation, e.g. after flipping *show reasoning* in `:config`).
 
 ```sh
 cai                 # new interactive session

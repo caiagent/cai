@@ -37,7 +37,7 @@ from cai.environment import Environment
 from cai.events import EventType
 from cai.screen import Screen
 from cai.screen.buffer import ContentBuffer
-from cai.screen.render import python_code_arg, render_python_code
+from cai.screen.render import render_tool_call
 from cai.screen.overlays import config as overlay_config
 from cai.screen.overlays.config import Setting
 from cai.session import SessionsRegistry
@@ -62,6 +62,8 @@ _PALETTE_COMMANDS = [
     ("prompts", "fuzzy-search your prompt history"),
     ("continue", "continue the conversation without a new prompt"),
     ("agents", "live view of sub-agents"),
+    ("status", "toggle the status widget (Tab): model, skills, tools, sub-agents"),
+    ("pending", "remove queued prompts / steers before they run"),
     ("system", "view / edit the system prompt"),
     ("sessions", "load a saved session"),
     ("config", "edit the live session settings"),
@@ -86,19 +88,6 @@ _NOTE_SECONDS = 4.0
 # context-window size used for the ctx % readout when config.json sets no
 # 'default_context_size'. matches the reference's fallback.
 _DEFAULT_CONTEXT_SIZE = 1_000_000
-
-
-def _short_args(tool_args):
-    """one-line preview of a tool call's arguments for the viewport."""
-    if not tool_args:
-        return ""
-    parts = []
-    for key in tool_args:
-        text = str(tool_args[key])
-        if len(text) > 60:
-            text = text[:60] + "..."
-        parts.append(f"{key}={text}")
-    return ", ".join(parts)
 
 
 def _status_text(model, state):
@@ -143,16 +132,10 @@ class _Transcript:
             self.note(f"> {(event.text or '').rstrip()}\n", Screen.USER)
             return
         if event.type == EventType.TOOL_CALL:
-            code = python_code_arg(event.tool_name, event.tool_args)
-            if code is not None:
-                rest = dict(event.tool_args)
-                del rest["code"]
-                self._stream(f"-> {event.tool_name}({_short_args(rest)})\n",
-                             "tool", Screen.TOOL)
-                self._screen.write(render_python_code(code), kind=Screen.TOOL)
-                return
-            self._stream(f"-> {event.tool_name}({_short_args(event.tool_args)})\n",
-                         "tool", Screen.TOOL)
+            header, block = render_tool_call(event.tool_name, event.tool_args)
+            self._stream(header + "\n", "tool", Screen.TOOL)
+            if block:
+                self._screen.write(block, kind=Screen.TOOL)
             return
         if event.type == EventType.TOOL_RESULT:
             kind = Screen.TOOL
@@ -448,6 +431,17 @@ class AgentClient:
     def get_info(self):
         return self._call("get_info") or {}
 
+    def get_steer(self):
+        """the steered texts queued on the agent, in delivery order."""
+        return self._call("get_steer") or []
+
+    def remove_steer(self, index, text):
+        """drop the queued steer at index (guarded by its text); True if it went."""
+        value = {}
+        value["index"] = index
+        value["text"] = text
+        return self._call("remove_steer", value) is True
+
     def get_messages(self):
         return self._call("get_messages") or []
 
@@ -577,6 +571,46 @@ class ScreenUI(BaseUI):
 
     def status(self, message):
         self._status.set_note(message)
+
+
+class _Jobs:
+    """the prompts queued behind the running turn, oldest first - a
+    queue.Queue the :pending view can also list and remove from. put() from
+    any thread; get(timeout) blocks like Queue.get and raises queue.Empty. an
+    entry is a prompt string, the _CONTINUE sentinel, or None (stop)."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._items = []
+
+    def put(self, item):
+        with self._cond:
+            self._items.append(item)
+            self._cond.notify()
+
+    def get(self, timeout=None):
+        with self._cond:
+            if not self._items:
+                self._cond.wait(timeout)
+            if not self._items:
+                raise queue.Empty
+            return self._items.pop(0)
+
+    def snapshot(self):
+        """the queued entries in run order (a copy)."""
+        with self._cond:
+            return list(self._items)
+
+    def remove(self, index, item):
+        """drop the entry at index if it still is `item` (the worker taking the
+        head shifts the list under a stale listing); returns whether it did."""
+        with self._cond:
+            if index < 0 or index >= len(self._items):
+                return False
+            if self._items[index] is not item and self._items[index] != item:
+                return False
+            del self._items[index]
+            return True
 
 
 class _Worker(threading.Thread):
@@ -890,14 +924,10 @@ def _replay_messages(screen, messages, cfg=None):
             name = function.get("name") or "?"
             call_names[call.get("id")] = name
             args = _stored_call_args(function)
-            code = python_code_arg(name, args)
-            if code is not None:
-                rest = dict(args)
-                del rest["code"]
-                screen.write(f"-> {name}({_short_args(rest)})\n", kind=Screen.TOOL, block=block)
-                screen.write(render_python_code(code), kind=Screen.TOOL)
-            else:
-                screen.write(f"-> {name}({_short_args(args)})\n", kind=Screen.TOOL, block=block)
+            header, body = render_tool_call(name, args)
+            screen.write(header + "\n", kind=Screen.TOOL, block=block)
+            if body:
+                screen.write(body, kind=Screen.TOOL)
             block = False
 
 
@@ -937,7 +967,6 @@ def _load_session(screen, client, status, path, cfg):
     status.set_model(client.get_info().get("model", ""))
     screen.clear_buffer()
     _replay_messages(screen, client.get_messages(), cfg)
-    _refresh_chips(screen, client, cfg)
     screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META, block=True)
 
 
@@ -1038,6 +1067,93 @@ def _open_sessions(screen, client, status, cfg):
         return
 
 
+def _pending_nodes(steers, queued):
+    """the :pending rows: steers first (a run folds them in at its next turn
+    boundary, ahead of anything queued), then the queued prompts in run order.
+    ids are kind + text + its occurrence number, so removing one row never
+    renames another and the overlay keeps its cursor on the same text."""
+    nodes = []
+    seen = {}
+
+    def add(kind, index, text):
+        label = text
+        if label is _CONTINUE:
+            label = "(continue)"
+        key = (kind, label)
+        n = seen.get(key, 0)
+        seen[key] = n + 1
+        node = {}
+        node["id"] = f"{kind}:{n}:{label}"
+        node["parent"] = None
+        node["kind"] = kind
+        node["index"] = index
+        node["item"] = text
+        node["text"] = label
+        nodes.append(node)
+
+    for i, text in enumerate(steers):
+        add("steer", i, text)
+    for i, item in enumerate(queued):
+        if item is None: continue
+        add("queued", i, item)
+    return nodes
+
+
+def _open_pending(screen, client, jobs, pending):
+    """open the :pending view: the steers the agent holds and the prompts
+    queued locally behind the running turn, oldest first. Ctrl-K removes the
+    highlighted one (a steer over the wire, a prompt from the local queue);
+    Enter/Esc close. opens only when there is something to show."""
+    from cai.screen.ansi import wrap_ansi, SGR_DIM_GRAY, SGR_AZURE_ON_DGRAY, SGR_RESET
+
+    def _fetch():
+        return _pending_nodes(client.get_steer(), jobs.snapshot())
+
+    if not _fetch():
+        screen.write("[nothing pending]\n", kind=Screen.META, block=True)
+        return
+
+    def _label(node):
+        head = node["text"].strip().splitlines()
+        first = ""
+        if head:
+            first = head[0]
+        tag = node["kind"]
+        if not node.get("present", True):
+            return f"{tag}  {first} · done"
+        return f"{tag}  {first}"
+
+    def _color(node):
+        if not node.get("present", True):
+            return SGR_DIM_GRAY
+        if node["kind"] == "steer":
+            return SGR_AZURE_ON_DGRAY
+        return ""
+
+    def _preview(node, width, max_lines):
+        return wrap_ansi(node["text"], width)[:max_lines]
+
+    def _remove(nid):
+        for node in _fetch():
+            if node["id"] != nid: continue
+            if node["kind"] == "steer":
+                client.remove_steer(node["index"], node["item"])
+                return
+            if jobs.remove(node["index"], node["item"]) and node["item"] is not _CONTINUE:
+                pending.user_removed()
+            return
+
+    screen.prompt_tree_overlay(
+        _fetch,
+        label_fn=_label,
+        preview_fn=_preview,
+        color_fn=_color,
+        action_fn=_remove,
+        title="pending",
+        hints='  j/k PgUp/Dn:preview /:search ^K:remove ESC:close',
+    )
+
+
 def _bool_setting(label, obj, attr):
     return Setting(label=label,
                    kind=overlay_config.BOOL,
@@ -1086,24 +1202,17 @@ def _list_setting(label, obj, attr):
                    set=write)
 
 
-def _open_config(screen, client, cfg, pending):
+def _open_config(screen, client, cfg):
     """the :config overlay - edit the env's live Settings (cai.settings) in
     place. edits apply to this session only; permanent config lives in init.py."""
     settings = []
     settings.append(_bool_setting("show reasoning", cfg, "show_reasoning"))
-    settings.append(_bool_setting("show chips", cfg, "show_chips"))
-    settings.append(_bool_setting("show chips skills", cfg, "show_chips_skills"))
-    settings.append(_bool_setting("show chips tools", cfg, "show_chips_tools"))
-    settings.append(_bool_setting("show chips subagents", cfg, "show_chips_subagents"))
     settings.append(_int_setting("tool result max chars", cfg, "tool_result_max_chars"))
     settings.append(_bool_setting("auto save sessions", cfg, "auto_save_sessions"))
     settings.append(_int_setting("max sessions mb", cfg, "max_sessions_mb"))
     settings.append(_list_setting("skills", cfg, "skills"))
     settings.append(_list_setting("tools", cfg, "tools"))
     screen.prompt_config_overlay(settings)
-    _refresh_chips(screen, client, cfg)
-    # toggling show_chips off must drop the pending widget too; on, restore it.
-    pending.refresh()
 
 
 def _save_session(screen, client, path, cfg):
@@ -1381,65 +1490,6 @@ def _open_agents(screen, client, cfg, status=None):
             screen.prompt_messages_overlay(messages)
 
 
-def _chip_lines(skills, tools):
-    """the chips widget body: one chip (screen.chip.Chip) per name, one row
-    per chip pair, the skills column (pink) to the left of the tools column
-    (cyan). every entry here is activated, so each body carries a one-column
-    check mark to its left. chips in a column share one width so each column
-    reads as a block; a row whose skills cell is empty paints nothing there,
-    so the conversation shows through."""
-    from cai.screen.ansi import SGR_PINK_ON_DGRAY, SGR_CYAN_ON_DGRAY
-    from cai.screen.chip import Chip
-
-    skill_width = 0
-    for name in skills:
-        skill_width = max(skill_width, len(name))
-    tool_width = 0
-    for name in tools:
-        tool_width = max(tool_width, len(name))
-
-    lines = []
-    count = max(len(skills), len(tools))
-    for i in range(count):
-        parts = []
-        if i < len(skills):
-            chip = Chip('✓ ' + skills[i].ljust(skill_width),
-                        sgr=SGR_PINK_ON_DGRAY)
-            parts.extend(chip.lines())
-        if tools:
-            if i < len(tools):
-                chip = Chip('✓ ' + tools[i].ljust(tool_width),
-                            sgr=SGR_CYAN_ON_DGRAY)
-                parts.extend(chip.lines())
-            elif i < len(skills):
-                # keep the skill chip in its column: blank out the tools cell
-                # so the chip doesn't drift to the right edge.
-                parts.append(' ' * (tool_width + 4))
-        lines.append(' '.join(parts))
-    return lines
-
-
-def _refresh_chips(screen, client, cfg):
-    """rebuild the hover chips widget from the agent's live selection (over
-    the wire): the active skills and tools, one pill per row. the show_chips
-    setting (:config) turns the widget off entirely; show_chips_skills and
-    show_chips_tools drop their column alone."""
-    if not cfg.show_chips:
-        screen.remove_widget("chips")
-        return
-    skills = []
-    if cfg.show_chips_skills:
-        skills = sorted(client.get_selected_skills())
-    tools = []
-    if cfg.show_chips_tools:
-        tools = sorted(client.get_selected_tools())
-    lines = _chip_lines(skills, tools)
-    if not lines:
-        screen.remove_widget("chips")
-        return
-    screen.add_widget("chips", lines)
-
-
 def _running_subagents(client):
     """display names of the live sub-agents descended from this session's
     agent, read solely over the agents sockets (like the :agents view):
@@ -1469,20 +1519,96 @@ def _running_subagents(client):
     return running
 
 
-def _agent_chip_lines(names):
-    """the agents widget body: one yellow chip per running sub-agent, one
-    row each, all padded to one width so the column reads as a block."""
-    from cai.screen.ansi import SGR_YELLOW_ON_DGRAY
-    from cai.screen.chip import Chip
+def _status_lines(model, skills, tools, subagents, user, steer):
+    """the status widget body: dim plain text, one heading per section and one
+    name per row beneath it; a section with nothing to list is left out. the
+    pending counts fold in as one row each. rows are padded to one width so
+    the block reads as a panel over the conversation."""
+    from cai.screen.ansi import SGR_DIM_GRAY, SGR_BOLD, SGR_RESET
 
+    rows = []
+    if model:
+        rows.append(("model", None))
+        rows.append(("  " + model, ""))
+    sections = []
+    sections.append(("skills", skills))
+    sections.append(("tools", tools))
+    sections.append(("sub-agents", subagents))
+    for heading, names in sections:
+        if not names: continue
+        rows.append((heading, None))
+        for name in names:
+            rows.append(("  " + name, ""))
+    if steer > 0 or user > 0:
+        rows.append(("pending", None))
+        if steer > 0:
+            rows.append((f"  {steer} steering", ""))
+        if user > 0:
+            rows.append((f"  {user} queued", ""))
+    if not rows:
+        rows.append(("(nothing active)", ""))
     width = 0
-    for name in names:
-        width = max(width, len(name))
+    for text, _style in rows:
+        width = max(width, len(text))
     lines = []
-    for name in names:
-        chip = Chip(name.ljust(width), sgr=SGR_YELLOW_ON_DGRAY)
-        lines.extend(chip.lines())
+    for text, style in rows:
+        cell = text.ljust(width)
+        if style is None:
+            lines.append(f"{SGR_BOLD}{cell}{SGR_RESET}")
+            continue
+        lines.append(f"{SGR_DIM_GRAY}{cell}{SGR_RESET}")
     return lines
+
+
+class _StatusWidget:
+    """the Tab-toggled 'status' hover widget: the agent's model, active skills
+    and tools (read over the wire), the live sub-agents (fed by the poll loop),
+    and the pending counts. toggle() shows/hides it and paints at once; while
+    visible the poll loop refreshes it every tick so :skills / :tools / a model
+    switch / a sub-agent starting show up without any call-site wiring. hidden
+    is the start state every session."""
+
+    def __init__(self, screen, client, pending):
+        self._screen = screen
+        self._client = client
+        self._pending = pending
+        self._lock = threading.Lock()
+        self._visible = False
+        self._subagents = []
+
+    @property
+    def visible(self):
+        with self._lock:
+            return self._visible
+
+    def toggle(self):
+        with self._lock:
+            self._visible = not self._visible
+            visible = self._visible
+        if not visible:
+            self._screen.remove_widget("status")
+            return
+        self.refresh()
+
+    def set_subagents(self, names):
+        with self._lock:
+            self._subagents = list(names)
+
+    def refresh(self):
+        """repaint from live state; a no-op while hidden. wire failures leave
+        the last painting in place rather than tearing the widget down."""
+        if not self.visible: return
+        try:
+            model = self._client.get_info().get("model", "")
+            skills = sorted(self._client.get_selected_skills())
+            tools = sorted(self._client.get_selected_tools())
+        except OSError:
+            return
+        with self._lock:
+            subagents = list(self._subagents)
+        user, steer = self._pending.counts()
+        lines = _status_lines(model, skills, tools, subagents, user, steer)
+        self._screen.add_widget("status", lines)
 
 
 def _pending_chip_lines(user, steer):
@@ -1517,12 +1643,16 @@ class _Pending:
     count. this object alone touches the widget, repainting only on a change so
     an idle session paints nothing."""
 
-    def __init__(self, screen, cfg):
+    def __init__(self, screen):
         self._screen = screen
-        self._cfg = cfg
         self._lock = threading.Lock()
         self._user = 0
         self._steer = 0
+
+    def counts(self):
+        """(user turns queued, steer texts pending) - what the status widget folds in."""
+        with self._lock:
+            return self._user, self._steer
 
     def user_queued(self):
         with self._lock:
@@ -1535,6 +1665,10 @@ class _Pending:
                 self._user -= 1
         self.refresh()
 
+    def user_removed(self):
+        """a queued prompt was dropped from :pending before it ran."""
+        self.user_started()
+
     def set_steer(self, count):
         with self._lock:
             if count == self._steer: return
@@ -1542,14 +1676,11 @@ class _Pending:
         self.refresh()
 
     def refresh(self):
-        """rebuild the widget from the current counts, honouring show_chips. safe
-        to call from any thread; add_widget/remove_widget take the render lock."""
+        """rebuild the widget from the current counts. safe to call from any
+        thread; add_widget/remove_widget take the render lock."""
         with self._lock:
             user = self._user
             steer = self._steer
-        if not self._cfg.show_chips:
-            self._screen.remove_widget("pending")
-            return
         lines = _pending_chip_lines(user, steer)
         if not lines:
             self._screen.remove_widget("pending")
@@ -1557,50 +1688,38 @@ class _Pending:
         self._screen.add_widget("pending", lines)
 
 
-# how often the chips loop re-reads the agents sockets for polled chip state.
+# how often the poll loop re-reads the agent (and the agents sockets) for state
+# no event announces: the steer count, and the status widget while visible.
 _AGENTS_REFRESH = 1.0
 
 
-class _ChipsLoop(threading.Thread):
-    """keeps the chips that mirror polled agent state in sync every
-    _AGENTS_REFRESH seconds: the 'agents' widget (live sub-agents, walked over
-    the agents sockets) and the steer count of the 'pending' widget (read from
-    this agent's get_info). polling is the only source - a sub-agent starting or
-    a steer draining is not an event on this run's stream. the agents widget is
-    only touched when its pill lines change, so an idle session repaints
-    nothing; _Pending does the same for its own widget."""
+class _PollLoop(threading.Thread):
+    """polls the agent-side state no event on this run's stream announces,
+    every _AGENTS_REFRESH seconds: the steer count into the 'pending' chip,
+    and - only while the status widget is visible - the live sub-agents
+    (walked over the agents sockets) plus a repaint of the widget, so it
+    tracks :skills / :tools / model switches / pending counts by itself."""
 
-    def __init__(self, screen, client, cfg, stop, pending):
-        super().__init__(daemon=True, name="cai-tui-chips")
-        self._screen = screen
+    def __init__(self, client, stop, pending, status_widget):
+        super().__init__(daemon=True, name="cai-tui-poll")
         self._client = client
-        self._cfg = cfg
         self._stop_event = stop
         self._pending = pending
-        self._last = []
+        self._status_widget = status_widget
 
     def run(self):
         while not self._stop_event.wait(_AGENTS_REFRESH):
-            if not self._cfg.show_chips:
-                self._pending.set_steer(0)
-                if self._last:
-                    self._screen.remove_widget("agents")
-                    self._last = []
-                continue
             try:
                 steer = self._client.get_info().get("pending_steer", 0)
-                lines = []
-                if self._cfg.show_chips_subagents:
-                    lines = _agent_chip_lines(_running_subagents(self._client))
             except OSError:
                 continue
             self._pending.set_steer(steer)
-            if lines == self._last: continue
-            self._last = lines
-            if not lines:
-                self._screen.remove_widget("agents")
+            if not self._status_widget.visible: continue
+            try:
+                self._status_widget.set_subagents(_running_subagents(self._client))
+            except OSError:
                 continue
-            self._screen.add_widget("agents", lines)
+            self._status_widget.refresh()
 
 
 def _tool_label(name):
@@ -1625,7 +1744,6 @@ def _open_tools(screen, client, cfg):
         entries.append((name, _tool_label(name)))
     new_selected = screen.prompt_tools_overlay(entries, active)
     client.set_selected_tools(sorted(new_selected))
-    _refresh_chips(screen, client, cfg)
 
 
 def _open_skills(screen, client, cfg):
@@ -1637,7 +1755,6 @@ def _open_skills(screen, client, cfg):
         return
     new_active = screen.prompt_skills_overlay(sorted(available), active)
     client.set_selected_skills(sorted(new_active))
-    _refresh_chips(screen, client, cfg)
 
 
 def _system_prompt_nodes(composed, base):
@@ -1722,7 +1839,7 @@ def _refresh_tokens(status):
     status.set_tokens(0)
 
 
-def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, ui):
+def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, ui, status_widget):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -1770,8 +1887,14 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, u
     if head == "models":
         _open_models(screen, client, status, registry)
         return False
+    if head == "pending":
+        _open_pending(screen, client, jobs, pending)
+        return False
+    if head == "status":
+        status_widget.toggle()
+        return False
     if head == "config":
-        _open_config(screen, client, env.settings, pending)
+        _open_config(screen, client, env.settings)
         return False
     if head == "tools":
         if screen._busy:
@@ -1912,7 +2035,7 @@ def run(*,
     client = AgentClient(server.path)
 
     screen = Screen()
-    jobs = queue.Queue()
+    jobs = _Jobs()
     stop = threading.Event()
 
     palette = list(_PALETTE_COMMANDS)
@@ -1979,17 +2102,17 @@ def run(*,
 
     screen.set_recall_handler(_on_recall)
 
-    pending = _Pending(screen, env.settings)
+    pending = _Pending(screen)
+    status_widget = _StatusWidget(screen, client, pending)
     worker = _Worker(client, screen, jobs, stop, status, env.settings, pending)
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
-    agents_chips = _ChipsLoop(screen, client, env.settings, stop, pending)
-    agents_chips.start()
+    poll_loop = _PollLoop(client, stop, pending, status_widget)
+    poll_loop.start()
 
-    screen.write(f"cai — model {model}. type to chat; :q to quit.\n",
+    screen.write(f"cai — model {model}. type to chat; :q to quit; Tab for status.\n",
                  kind=Screen.META, block=True)
-    _refresh_chips(screen, client, env.settings)
 
     # resume at startup: --continue loads the resolved session directly;
     # --sessions opens the picker. nothing is running yet, so no idle gate.
@@ -2013,7 +2136,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending, worker._ui):
+                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending, worker._ui, status_widget):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just
@@ -2036,7 +2159,7 @@ def run(*,
         server.close()
         worker.join(timeout=2)
         status_loop.join(timeout=2)
-        agents_chips.join(timeout=2)
+        poll_loop.join(timeout=2)
         client.close()
         screen.close()
         # through the server, not the local variable: a :clone swapped the

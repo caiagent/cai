@@ -7,12 +7,16 @@ tools stay terminal-agnostic: a block carries plain text plus a render hint
 file:line:col:text matches). unknown hints fall back to dim plain text, so
 a misspelled hint degrades instead of breaking.
 
-the first-class `python` tool gets the same treatment on its CALL side: its
-input is always a python script, so the transcript shows the code argument as
-an indented, syntax-colored block (render_python_code) instead of squashing it
-into the one-line arg preview."""
+the CALL side renders in full too (render_tool_call): a tool call IS what the
+model did, so the transcript never truncates its arguments. short scalar
+values stay inline on the '-> name(...)' line; a long or multi-line value
+drops into an indented block below, labelled with its key - and the `python`
+tool's script renders as a syntax-colored block (render_python_code). one
+oversized value (a base64 blob from an MCP tool, say) is cut at
+CALL_VALUE_MAX_CHARS with a pointer to :messages, which shows it whole."""
 
 import io
+import json
 import keyword
 import re
 import tokenize
@@ -251,6 +255,72 @@ def render_python_code(code):
     for line in styled:
         out.append(f"{SGR_RESET}{_INDENT}{line}\n")
     return ''.join(out)
+
+
+# an argument value this long or shorter, with no newline, stays inline on the
+# '->' line; anything else drops into a labelled block below it.
+INLINE_VALUE_MAX_CHARS = 60
+# a single argument value is never painted past this - a guard against a
+# pathological blob flooding the transcript, not a display choice; the
+# :messages overlay shows every argument in full.
+CALL_VALUE_MAX_CHARS = 20_000
+
+
+def _value_text(value):
+    """an argument value as display text: a string as-is (its newlines kept),
+    anything else as JSON - compact when it fits inline, indented otherwise."""
+    if isinstance(value, str):
+        return value
+    compact = json.dumps(value, ensure_ascii=False)
+    if len(compact) <= INLINE_VALUE_MAX_CHARS:
+        return compact
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def _is_inline(text):
+    if '\n' in text:
+        return False
+    return len(text) <= INLINE_VALUE_MAX_CHARS
+
+
+def _block_lines(text):
+    """the styled lines of one long argument value, capped at
+    CALL_VALUE_MAX_CHARS with a pointer to :messages."""
+    hidden = len(text) - CALL_VALUE_MAX_CHARS
+    if hidden > 0:
+        text = text[:CALL_VALUE_MAX_CHARS]
+    lines = _format_plain(text.strip('\n').split('\n'))
+    if hidden > 0:
+        lines.append(f"{SGR_DIM_GRAY}… +{hidden} chars, see :messages{SGR_RESET}")
+    return lines
+
+
+def render_tool_call(tool_name, tool_args):
+    """(header, block) for a tool call: header is the '-> name(k=v, ...)' line
+    (no newline) carrying the inline-sized arguments; block is the ANSI text
+    of the long ones, each under a '  key:' label with its lines indented
+    below - '' when every argument fit inline. the python tool's `code`
+    renders unlabelled as a syntax-colored block, after any other long
+    arguments. ends with '\\n' when non-empty."""
+    inline = []
+    long_args = []
+    code = python_code_arg(tool_name, tool_args)
+    for key in (tool_args or {}):
+        if code is not None and key == 'code': continue
+        text = _value_text(tool_args[key])
+        if _is_inline(text):
+            inline.append(f"{key}={text}")
+            continue
+        long_args.append((key, text))
+    header = f"-> {tool_name}({', '.join(inline)})"
+    out = []
+    for key, text in long_args:
+        out.append(f"{SGR_RESET}{_INDENT}{SGR_DIM_GRAY}{key}:{SGR_RESET}\n")
+        for line in _block_lines(text):
+            out.append(f"{SGR_RESET}{_INDENT}{_INDENT}{line}\n")
+    if code is not None:
+        out.append(render_python_code(code))
+    return header, ''.join(out)
 
 
 def render_display(blocks):

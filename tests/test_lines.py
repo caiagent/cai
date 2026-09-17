@@ -152,6 +152,8 @@ def test_trace_carries_tool_calls_to_stderr_grouped(monkeypatch, capsys):
     monkeypatch.setattr(lines, "_note", notes.append)
     events = [Event(type=EventType.TOOL_CALL, tool_name="fs__read", tool_args={"path": "x"}),
               Event(type=EventType.TOOL_RESULT, tool_name="fs__read", tool_result="12345"),
+              Event(type=EventType.TOOL_CALL, tool_name="fs__write",
+                    tool_args={"path": "y", "content": "l1\nl2"}),
               Event(type=EventType.CONTENT, text="the answer")]
     runs = {}
     runs["a"] = FakeRun("the answer", events=events)
@@ -162,6 +164,8 @@ def test_trace_carries_tool_calls_to_stderr_grouped(monkeypatch, capsys):
     assert code == 0
     trace = "\n".join(notes)
     assert "-> fs__read(path=x)" in trace
+    # a long argument reaches the trace whole, as a labelled block
+    assert "-> fs__write(path=y)\n    content:\n      l1\n      l2" in trace
     assert "<- fs__read: 5 chars" in trace
     assert "the answer" not in trace              # content IS the answer, not trace
     assert capsys.readouterr().out == "a\tthe answer\n"

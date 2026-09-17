@@ -271,3 +271,22 @@ def test_prompt_broadcasts_render_but_status_is_skipped():
     text = out.getvalue()
     assert "[confirm] sure?" in text
     assert "working" not in text
+
+
+def test_printer_long_args_render_as_a_block_plain_off_a_tty():
+    out = io.StringIO()
+    printer = tail._Printer(out)
+    args = {"file_path": "n.txt", "content": "one\ntwo"}
+    printer.event(Event(type=EventType.TOOL_CALL, tool_name="fs__create_file", tool_args=args))
+    assert out.getvalue() == ("  -> fs__create_file(file_path=n.txt)\n"
+                              "    content:\n"
+                              "      one\n"
+                              "      two\n")
+    assert "\033[" not in out.getvalue()          # no colors off a tty, nothing dropped
+
+
+def test_printer_python_code_prints_off_a_tty_too():
+    out = io.StringIO()
+    printer = tail._Printer(out)
+    printer.event(Event(type=EventType.TOOL_CALL, tool_name="python", tool_args={"code": "print(1)"}))
+    assert out.getvalue() == "  -> python()\n    print(1)\n"

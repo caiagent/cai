@@ -43,18 +43,6 @@ def live_names():
     return names
 
 
-def _short_args(tool_args):
-    if not tool_args:
-        return ""
-    parts = []
-    for key in tool_args:
-        text = str(tool_args[key])
-        if len(text) > 40:
-            text = text[:40] + "..."
-        parts.append(f"{key}={text}")
-    return ", ".join(parts)
-
-
 def _stored_call_args(function):
     """a stored tool call's arguments dict (they cross the API as JSON text)."""
     import json
@@ -123,20 +111,22 @@ class _Printer:
         self.dirty = False
 
     def tool_call(self, name, args):
-        # a python call is always a script: its code argument prints as a
-        # syntax-colored block under the line instead of a truncated blob.
-        from cai.screen.render import python_code_arg, render_python_code
+        # the same rendering as the TUI transcript (render_tool_call): short
+        # values inline, long ones as labelled blocks under the line, python
+        # code syntax-colored - all of it, never truncated. the block carries
+        # its own colors, so off a tty it is written stripped, not dropped.
+        from cai.screen.ansi import ansi_strip
+        from cai.screen.render import render_tool_call
 
-        code = python_code_arg(name, args)
-        if code is None:
-            self.line(f"  -> {name}({_short_args(args)})")
+        header, block = render_tool_call(name, args)
+        self.line("  " + header)
+        if not block:
             return
-        rest = dict(args)
-        del rest["code"]
-        self.line(f"  -> {name}({_short_args(rest)})")
         if not self.tty:
-            return
-        self.out.write(render_python_code(code))
+            block = ansi_strip(block)
+        for text in block.splitlines():
+            self.out.write("  " + text + "\n")
+        self.out.flush()
         self.out.flush()
 
     def event(self, event):

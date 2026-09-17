@@ -332,6 +332,30 @@ def test_control_set_model_switches_the_model(serve):
     assert info["model"] == "new-model"
 
 
+def test_control_lists_and_removes_queued_steers(serve):
+    agent = make_agent()
+    # queue directly (no run in flight, and no drain-run wanted): what a
+    # client would see after two '!' steers on a busy agent
+    agent.steer("first", run_on_idle=False)
+    agent.steer("second", run_on_idle=False)
+    wire = serve(agent)
+    ok, listed, error = wire.control("get_steer")
+    assert ok is True
+    assert listed == ["first", "second"]
+    ok, removed, error = wire.control("remove_steer", {"index": 0, "text": "first"})
+    assert ok is True
+    assert removed is True
+    ok, listed, error = wire.control("get_steer")
+    assert listed == ["second"]
+    ok, info, error = wire.control("get_info")
+    assert info["pending_steer"] == 1
+    # a stale removal (the text no longer sits at that index) is refused
+    ok, removed, error = wire.control("remove_steer", {"index": 0, "text": "first"})
+    assert ok is True
+    assert removed is False
+    assert agent.steer_snapshot() == ["second"]
+
+
 def test_control_get_info_reports_the_last_turns_tokens(serve):
     wire = serve(make_agent(api=UsageApi(chunks=["a", "b"], totals=[120, 340])))
     ok, info, error = wire.control("get_info")

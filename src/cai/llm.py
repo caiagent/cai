@@ -89,6 +89,23 @@ class SteerQueue:
         with self._lock:
             return len(self._messages)
 
+    def snapshot(self):
+        """the queued texts in delivery order (a copy) - what a UI lists."""
+        with self._lock:
+            return list(self._messages)
+
+    def remove(self, index, text):
+        """drop the queued text at `index`, but only if it still reads `text`:
+        a drain (or another removal) racing the UI shifts the list, and then
+        the stale index must not take a neighbour. returns whether it did."""
+        with self._lock:
+            if index < 0 or index >= len(self._messages):
+                return False
+            if self._messages[index] != text:
+                return False
+            del self._messages[index]
+            return True
+
 
 def _parse_args(arguments):
     """parse a tool call's raw argument blob into a dict. returns (ok, args): ok

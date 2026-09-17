@@ -595,6 +595,14 @@ class Agent:
         boundary, so they are pending until it does."""
         return self._steer.count()
 
+    def steer_snapshot(self):
+        """the steered texts still queued, in delivery order (a copy)."""
+        return self._steer.snapshot()
+
+    def steer_remove(self, index, text):
+        """drop a queued steer before a run folds it in; see SteerQueue.remove."""
+        return self._steer.remove(index, text)
+
     def _stream(self, stream, prompt=None, strict_format=None):
         """the orchestration: stream one call_llm turn over the live conversation.
         yields Event objects and returns the final answer text. combines the

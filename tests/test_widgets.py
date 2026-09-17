@@ -1,7 +1,7 @@
 """Tests for the hover-widget layer: the Chip primitive (a styled pill with
-optional position and timeout), the chips builders (skills column left of the
-tools column, uniform chip widths), the layout's top-right widget painting
-with +N truncation, and the screen's widget registry flattening."""
+optional position and timeout), the pending chip builder, the Tab-toggled
+status widget, the layout's top-right widget painting with +N truncation, and
+the screen's widget registry flattening."""
 import re
 import threading
 import time
@@ -10,7 +10,7 @@ from cai.screen.ansi import ansi_strip, cur_move
 from cai.screen.chip import Chip
 from cai.screen.layout import Layout
 from cai.screen.screen import Screen
-from cai.tui import _agent_chip_lines, _chip_lines, _pending_chip_lines, _Pending
+from cai.tui import _pending_chip_lines, _Pending, _status_lines, _StatusWidget
 
 
 # --- the Chip primitive ---
@@ -30,60 +30,6 @@ def test_chip_defaults():
     chip = Chip("git")
     assert chip.position is None
     assert chip.timeout is None
-
-
-# --- the chips builders ---
-
-
-def test_chip_lines_skills_left_of_tools():
-    lines = _chip_lines(["git"], ["fs__read", "fs__write"])
-    assert len(lines) == 2
-    first = ansi_strip(lines[0])
-    assert first.index("git") < first.index("fs__read")
-
-
-def test_chip_lines_columns_share_a_width():
-    lines = _chip_lines([], ["fs", "fs__write"])
-    assert len(ansi_strip(lines[0])) == len(ansi_strip(lines[1]))
-
-
-def test_chip_lines_rows_align_when_skills_run_out():
-    lines = _chip_lines(["git"], ["fs__read", "fs__write"])
-    # the tools-only row is exactly one tools cell wide, so right-alignment
-    # lands it in the tools column.
-    tools_cell = len(" ✓ fs__write ")
-    assert len(ansi_strip(lines[1])) == tools_cell
-
-
-def test_chip_lines_blanks_the_tools_cell_when_tools_run_out():
-    lines = _chip_lines(["git", "web"], ["fs"])
-    # both rows span the full width: the second row pads the tools cell so
-    # the skill chip stays in its column.
-    assert len(ansi_strip(lines[0])) == len(ansi_strip(lines[1]))
-    assert ansi_strip(lines[1]).endswith(" ")
-
-
-def test_chip_lines_check_activated_entries():
-    lines = _chip_lines(["git"], ["fs"])
-    body = ansi_strip(lines[0])
-    assert body.count("✓") == 2
-    assert re.search(r"✓ git\b", body)
-    assert re.search(r"✓ fs\b", body)
-
-
-def test_chip_lines_empty():
-    assert _chip_lines([], []) == []
-
-
-def test_agent_chip_lines_share_a_width():
-    lines = _agent_chip_lines(["scout", "researcher"])
-    # one framed chip per agent, one row each
-    assert len(lines) == 2
-    assert len(ansi_strip(lines[0])) == len(ansi_strip(lines[1]))
-
-
-def test_agent_chip_lines_empty():
-    assert _agent_chip_lines([]) == []
 
 
 # --- the pending chip builder ---
@@ -128,14 +74,9 @@ class _WidgetHost:
         self.widgets.pop(name, None)
 
 
-class _Cfg:
-    def __init__(self, show_chips=True):
-        self.show_chips = show_chips
-
-
 def test_pending_counts_user_turns_up_and_down():
     host = _WidgetHost()
-    pending = _Pending(host, _Cfg())
+    pending = _Pending(host)
     pending.user_queued()
     pending.user_queued()
     assert "2 queued" in ansi_strip(host.widgets["pending"][0])
@@ -147,64 +88,18 @@ def test_pending_counts_user_turns_up_and_down():
 
 def test_pending_user_started_never_goes_negative():
     host = _WidgetHost()
-    pending = _Pending(host, _Cfg())
+    pending = _Pending(host)
     pending.user_started()
     assert "pending" not in host.widgets
 
 
 def test_pending_tracks_the_steer_count():
     host = _WidgetHost()
-    pending = _Pending(host, _Cfg())
+    pending = _Pending(host)
     pending.set_steer(3)
     assert "3 steering" in ansi_strip(host.widgets["pending"][0])
     pending.set_steer(0)
     assert "pending" not in host.widgets
-
-
-def test_pending_hidden_when_show_chips_off():
-    host = _WidgetHost()
-    cfg = _Cfg(show_chips=False)
-    pending = _Pending(host, cfg)
-    pending.user_queued()
-    pending.set_steer(2)
-    assert "pending" not in host.widgets
-    # turning chips back on and refreshing restores the widget
-    cfg.show_chips = True
-    pending.refresh()
-    assert "pending" in host.widgets
-
-
-def test_render_widgets_right_aligns_each_line(capsys):
-    layout = Layout(10, 40)
-    layout.render_widgets(["abc", "de"], 40)
-    out = capsys.readouterr().out
-    assert cur_move(1, 38) in out
-    assert cur_move(2, 39) in out
-
-
-def test_render_widgets_truncates_with_a_count(capsys):
-    layout = Layout(10, 40)
-    lines = []
-    for i in range(10):
-        lines.append(f"w{i}")
-    layout.render_widgets(lines, 40)
-    out = capsys.readouterr().out
-    # content_rows is 8: seven lines painted, the eighth row is the +3 tag.
-    assert "w6" in out
-    assert "w7" not in out
-    assert "+3" in out
-
-
-class _Carrier:
-    def __init__(self, widgets):
-        self._widgets = widgets
-
-
-def test_widget_lines_flatten_in_insertion_order_with_a_gap():
-    widgets = {}
-    widgets["chips"] = ["a", "b"]
-    widgets["other"] = ["c"]
-    assert Screen._widget_lines(_Carrier(widgets)) == ["a", "b", "", "c"]
 
 
 # --- chips on the screen: stacking, anchoring, timeout ---
@@ -320,3 +215,71 @@ def test_prompt_entries_flatten_multiline_labels():
 
 def test_prompt_entries_skip_blanks():
     assert _prompt_entries(["", "  \n ", "real"]) == {"real": "real"}
+
+
+# --- the status widget ---
+
+
+def test_status_lines_sections_and_padding():
+    lines = _status_lines("gpt-x", ["git"], ["fs__read"], [], 0, 0)
+    plain = []
+    for line in lines:
+        plain.append(ansi_strip(line))
+    assert plain[0].strip() == "model"
+    assert plain[1].strip() == "gpt-x"
+    assert plain[2].strip() == "skills"
+    assert plain[3].strip() == "git"
+    assert plain[4].strip() == "tools"
+    assert plain[5].strip() == "fs__read"
+    assert "sub-agents" not in " ".join(plain)       # empty section is left out
+    widths = set()
+    for text in plain:
+        widths.add(len(text))
+    assert len(widths) == 1
+
+
+def test_status_lines_pending_and_subagents_and_empty():
+    plain = []
+    for line in _status_lines("", [], [], ["scout"], 2, 1):
+        plain.append(ansi_strip(line).strip())
+    assert plain == ["sub-agents", "scout", "pending", "1 steering", "2 queued"]
+    assert ansi_strip(_status_lines("", [], [], [], 0, 0)[0]).strip() == "(nothing active)"
+
+
+class _StatusClient:
+    def __init__(self):
+        self.model = "m1"
+        self.skills = ["python"]
+        self.tools = ["echo"]
+
+    def get_info(self):
+        return {"model": self.model}
+
+    def get_selected_skills(self):
+        return list(self.skills)
+
+    def get_selected_tools(self):
+        return list(self.tools)
+
+
+def test_status_widget_toggles_and_refreshes_only_while_visible():
+    host = _WidgetHost()
+    pending = _Pending(host)
+    client = _StatusClient()
+    widget = _StatusWidget(host, client, pending)
+    assert widget.visible is False
+    widget.refresh()
+    assert "status" not in host.widgets             # hidden: refresh paints nothing
+    widget.toggle()
+    assert widget.visible is True
+    text = " ".join(ansi_strip(l) for l in host.widgets["status"])
+    assert "m1" in text and "python" in text and "echo" in text
+    client.skills = ["python", "fs"]
+    widget.set_subagents(["scout"])
+    pending.user_queued()
+    widget.refresh()
+    text = " ".join(ansi_strip(l) for l in host.widgets["status"])
+    assert "fs" in text and "scout" in text and "1 queued" in text
+    widget.toggle()
+    assert widget.visible is False
+    assert "status" not in host.widgets

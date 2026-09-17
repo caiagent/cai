@@ -398,34 +398,19 @@ def _build_messages(args, prompt, parser):
     return messages
 
 
-def _short_args(tool_args):
-    if not tool_args:
-        return ""
-    parts = []
-    for key in tool_args:
-        text = str(tool_args[key])
-        if len(text) > 40:
-            text = text[:40] + "..."
-        parts.append(f"{key}={text}")
-    return ", ".join(parts)
-
-
 def _diag_tool_call(tool_name, tool_args):
-    """the '-> tool(...)' diagnostic line; a python call is always a script,
-    so its code argument prints as a syntax-colored block under the line
-    instead of a truncated blob."""
-    from cai.screen.render import python_code_arg, render_python_code
+    """the '-> tool(...)' diagnostic line, rendered like the TUI transcript
+    (render_tool_call): short values inline, long ones as labelled blocks
+    under the line, python code syntax-colored, never truncated. the block
+    lines carry their own styling, so they bypass _diag's dimming."""
+    from cai.screen.render import render_tool_call
 
-    code = python_code_arg(tool_name, tool_args)
-    if code is None:
-        _diag(f"  -> {tool_name}({_short_args(tool_args)})")
+    header, block = render_tool_call(tool_name, tool_args)
+    _diag("  " + header)
+    if not block or not _STDERR_TTY:
         return
-    rest = dict(tool_args)
-    del rest["code"]
-    _diag(f"  -> {tool_name}({_short_args(rest)})")
-    if not _STDERR_TTY:
-        return
-    sys.stderr.write(render_python_code(code))
+    for text in block.splitlines():
+        sys.stderr.write("  " + text + "\n")
     sys.stderr.flush()
 
 

@@ -105,6 +105,44 @@ def test_steer_queue_drain_clears():
     assert q.drain() == []
 
 
+def test_steer_queue_snapshot_is_a_copy():
+    q = SteerQueue()
+    q.push("a")
+    listed = q.snapshot()
+    listed.append("x")
+    assert q.snapshot() == ["a"]
+    assert q.count() == 1
+
+
+def test_steer_queue_remove_guards_index_by_text():
+    q = SteerQueue()
+    q.push("a")
+    q.push("b")
+    q.push("c")
+    assert q.remove(1, "b") is True
+    assert q.snapshot() == ["a", "c"]
+    # a stale listing: index 1 now reads "c", not "b" - nothing is dropped
+    assert q.remove(1, "b") is False
+    assert q.remove(5, "c") is False
+    assert q.remove(-1, "a") is False
+    assert q.snapshot() == ["a", "c"]
+    # what stays is what a drain delivers
+    assert q.drain() == ["a", "c"]
+
+
+def test_agent_steer_snapshot_and_remove():
+    agent = Agent(model="m", api=object())
+    try:
+        agent.steer("one", run_on_idle=False)
+        agent.steer("two", run_on_idle=False)
+        assert agent.steer_snapshot() == ["one", "two"]
+        assert agent.steer_remove(0, "one") is True
+        assert agent.steer_snapshot() == ["two"]
+        assert agent.steer_count() == 1
+    finally:
+        agent.close()
+
+
 # --------------------------------------------------------------------------
 # call_llm directly
 # --------------------------------------------------------------------------

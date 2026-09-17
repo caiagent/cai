@@ -571,6 +571,16 @@ class WiredAgent:
             value["pending_steer"] = agent.steer_count()
             value["tokens"] = agent.tokens
             return True, value, None
+        if op == "get_steer":
+            # the queued steer texts in delivery order - what :pending lists.
+            return True, agent.steer_snapshot(), None
+        if op == "remove_steer":
+            # value = {"index": i, "text": t}; the text guards against a drain
+            # that shifted the queue between the listing and the removal.
+            value = value or {}
+            removed = agent.steer_remove(int(value.get("index", -1)),
+                                         value.get("text", ""))
+            return True, removed, None
         if op == "clone":
             # swap the served agent for a fresh branch of itself: same socket,
             # same wires, same WireUI - every connected client now observes the

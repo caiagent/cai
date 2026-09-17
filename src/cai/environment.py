@@ -96,10 +96,6 @@ class Settings:
     merged into --skill / --tool by Environment.merge_activations; an SDK run
     builds Agent/Run directly and never passes through that merge."""
     show_reasoning: bool = True
-    show_chips: bool = True
-    show_chips_skills: bool = True
-    show_chips_tools: bool = False
-    show_chips_subagents: bool = False
     tool_result_max_chars: int = 40_000
     auto_save_sessions: bool = True
     max_sessions_mb: int = 500

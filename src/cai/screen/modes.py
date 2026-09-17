@@ -7,7 +7,7 @@ from .ansi import (
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_ALT_ENTER,
     KEY_CTRL_W, KEY_CTRL_BACKSPACE, KEY_ALT_BACKSPACE, KEY_DEL,
     KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_V, KEY_CTRL_A, KEY_CTRL_E,
-    KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_P, KEY_CTRL_R, KEY_CTRL_S,
+    KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_P, KEY_CTRL_Q, KEY_CTRL_R, KEY_CTRL_S,
     KEY_CTRL_T, KEY_CTRL_U, KEY_CTRL_X, KEY_TAB,
     KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
     KEY_PGUP, KEY_PGDN,
@@ -178,6 +178,7 @@ _OVERLAY_SHORTCUTS = {
     KEY_CTRL_L: 'messages',
     KEY_CTRL_S: 'skills',
     KEY_CTRL_R: 'models',
+    KEY_CTRL_Q: 'pending',
 }
 
 
@@ -286,6 +287,13 @@ class ModeHandler:
             shortcut = _OVERLAY_SHORTCUTS.get(key)
             if shortcut is not None:
                 raise CommandException(shortcut)
+
+        # Tab: toggle the status widget (model, skills, tools, sub-agents).
+        # Inert while a live ask element owns the keys (a confirm's yes/no
+        # toggles on Tab) and while typing a ':' command (completion) or a search.
+        if key == KEY_TAB and state.mode in (Mode.NORMAL, Mode.INSERT):
+            if getattr(screen, '_live', None) is None:
+                raise CommandException('status')
 
         # Ctrl-X: pull the last (interrupted) user prompt back into the input
         # box for editing. Inert while typing a ':' command or a search.
