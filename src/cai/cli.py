@@ -456,21 +456,14 @@ def _drive(run, show_reasoning=True):
 
 
 def _publish_paths(flag, var, spec):
-    """resolve the comma-separated files or directories of a path flag and
-    export them under the env var for cai.safe_path and every spawned tool
-    process. False when an entry does not exist."""
-    roots = []
-    for entry in spec.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        root = os.path.realpath(entry)
-        if not os.path.exists(root):
-            print(f"{flag} entry does not exist: {entry!r}", file=sys.stderr)
-            return False
-        roots.append(root)
-    if roots:
-        os.environ[var] = os.pathsep.join(roots)
+    """export a path flag's entries under its env var via cai.paths.publish;
+    False (with the reason on stderr) when an entry does not exist."""
+    from cai import paths
+    try:
+        paths.publish(var, spec)
+    except ValueError as e:
+        print(f"{flag} {e}", file=sys.stderr)
+        return False
     return True
 
 

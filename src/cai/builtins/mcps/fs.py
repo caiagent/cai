@@ -25,6 +25,7 @@ binary intermediates) stay searchable and readable with these same tools.
 import os
 import re
 import shutil
+import time
 from collections import deque
 from typing import Optional
 
@@ -323,19 +324,26 @@ def _read_binary(safe, offset_start, offset_end):
 
 
 @mcp.tool()
-def list_files(path: str = ".", pattern: str = "",
-               start: Optional[int] = None, end: Optional[int] = None) -> str:
-    """Recursively list files and directories under `path`, shallowest first -
-    this is the tool for finding files by NAME (search looks inside files,
-    not at names). Each line is "file  <rel-path>" or "dir  <rel-path>".
+def list_files(path: str = ".", pattern: str = "", depth: int = 0,
+               start: Optional[int] = None, end: Optional[int] = None,
+               timeout: float = 10.0) -> str:
+    """List files and directories under `path`, shallowest first - this is
+    the tool for finding files by NAME (search looks inside files, not at
+    names). Each line is "file  <rel-path>" or "dir  <rel-path>".
 
     Args:
         path:      Root directory (default ".").
         pattern:   Optional regex on the relative path - the way to find a
                    file by name, e.g. "conftest" or "\\.toml$" (traversal
-                   still goes full-depth).
+                   still goes `depth` deep).
+        depth:     How many levels below `path` to descend: 0 (default) lists
+                   only its direct children, 1 adds their children, and so
+                   on; -1 walks the whole tree.
         start/end: 1-based result-line window (default 1..100; paginate
                    with start=101 etc, or ask for a larger range).
+        timeout:   Seconds the walk may take (default 10). When it runs out
+                   the entries found so far are returned with a note, so
+                   narrow `path`, lower `depth`, or raise `timeout`.
     """
     try:
         root = safe_path(path)
@@ -349,10 +357,15 @@ def list_files(path: str = ".", pattern: str = "",
         except re.error as e:
             return f"Error: invalid pattern: {e}"
 
+    deadline = time.monotonic() + timeout
+    timed_out = False
     entries = []
-    queue = deque([root])
+    queue = deque([(root, 0)])
     while queue:
-        current = queue.popleft()
+        if time.monotonic() > deadline:
+            timed_out = True
+            break
+        current, level = queue.popleft()
         try:
             children = sorted(os.listdir(current))
         except PermissionError:
@@ -366,18 +379,21 @@ def list_files(path: str = ".", pattern: str = "",
                 kind = "dir"
             if rx is None or rx.search(rel):
                 entries.append(f"{kind}  {rel}")
-            if os.path.isdir(full):
-                queue.append(full)
-
-    if not entries:
-        return "(empty)"
+            if kind == "dir" and (depth < 0 or level < depth):
+                queue.append((full, level + 1))
 
     def depth_then_name(entry):
         rel = entry.split("  ", 1)[1]
         return rel.count(os.sep), rel
 
     entries.sort(key=depth_then_name)
-    return _paginate(entries, start, end, "entries")
+    text = "(empty)"
+    if entries:
+        text = _paginate(entries, start, end, "entries")
+    if timed_out:
+        text += (f"\n[timed out after {timeout:g}s; listing is partial - "
+                 f"narrow path, lower depth, or raise timeout]")
+    return text
 
 
 def _decode_content(content, encoding):

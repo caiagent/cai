@@ -105,7 +105,10 @@ tool process honor; read-only inside the python-tool jail).
 never touch, even inside the working directory or a grant — a deny always
 wins (published as `CAI_DISALLOWED_PATHS`; the python-tool jail masks each
 one with an empty read-only mount, so spawned programs cannot see them
-either).
+either). Both lists can be changed mid-session: `:allow p1,p2` /
+`:disallow p1,p2` replace a list with the same syntax, bare `:allow` shows
+it, `:allow -` clears it — tool servers restart under the new policy between
+turns.
 
 Three stream modes ride the same flags:
 

@@ -15,7 +15,8 @@ files or directories; the --allowed-paths CLI flag sets it), which spawned MCP
 servers and the python-tool child inherit like CAI_SCRATCH. A directory grants
 its whole subtree; a file grants just that file. CAI_DISALLOWED_PATHS (the
 --disallowed-paths flag) is the mirror image: paths denied everywhere, even
-inside the cwd or a grant - a deny always wins over an allow.
+inside the cwd or a grant - a deny always wins over an allow. publish() is the
+one writer of both vars (the flags at startup, Agent.set_paths at runtime).
 Exposed as cai.safe_path / cai.scratch_dir so an extension's MCP servers and
 function tools share one implementation instead of vendoring copies. A server
 file cai spawns runs under the same interpreter, so `from cai import safe_path`
@@ -84,6 +85,39 @@ def disallowed_paths():
     """the files/directories denied via CAI_DISALLOWED_PATHS, realpath'd, or
     [] when the var is unset/empty."""
     return _roots_from(_DISALLOWED_VAR)
+
+
+def resolve_spec(spec):
+    """the realpath'd roots of a comma-separated files-or-directories spec
+    (the --allowed-paths / --disallowed-paths syntax), resolved against the
+    cwd. raises ValueError naming an entry that does not exist."""
+    roots = []
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        root = os.path.realpath(entry)
+        if not os.path.exists(root):
+            raise ValueError(f"entry does not exist: {entry!r}")
+        roots.append(root)
+    return roots
+
+
+def export(var, roots):
+    """set `var` (CAI_ALLOWED_PATHS / CAI_DISALLOWED_PATHS) to the pathsep-joined
+    roots for safe_path and every tool process spawned from now on; no roots
+    unsets it."""
+    if not roots:
+        os.environ.pop(var, None)
+        return
+    os.environ[var] = os.pathsep.join(roots)
+
+
+def publish(var, spec):
+    """resolve_spec + export in one step: the writer behind the
+    --allowed-paths / --disallowed-paths flags. an empty spec unsets the var;
+    a missing entry raises ValueError, leaving the var untouched."""
+    export(var, resolve_spec(spec))
 
 
 def _under(resolved, root):

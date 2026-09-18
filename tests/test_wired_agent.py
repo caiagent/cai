@@ -1131,3 +1131,31 @@ def test_kill_during_a_run_aborts_it():
     assert not thread.is_alive()
     client_sock.close()
     server_sock.close()
+
+
+def test_control_get_and_set_paths(serve, tmp_path, monkeypatch):
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    monkeypatch.delenv("CAI_DISALLOWED_PATHS", raising=False)
+    agent = make_agent()
+    wire = serve(agent)
+    ok, value, error = wire.control("get_paths")
+    assert ok is True
+    assert value == {"allowed": [], "disallowed": []}
+    ok, value, error = wire.control("set_paths", {"allowed": str(extra), "disallowed": None})
+    assert ok is True
+    ok, value, error = wire.control("get_paths")
+    assert value == {"allowed": [str(extra)], "disallowed": []}
+
+
+def test_control_set_paths_missing_entry_fails_cleanly(serve, tmp_path, monkeypatch):
+    monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    monkeypatch.delenv("CAI_DISALLOWED_PATHS", raising=False)
+    agent = make_agent()
+    wire = serve(agent)
+    ok, value, error = wire.control("set_paths", {"allowed": str(tmp_path / "nope")})
+    assert ok is False
+    assert "does not exist" in error
+    ok, value, error = wire.control("get_paths")
+    assert value == {"allowed": [], "disallowed": []}

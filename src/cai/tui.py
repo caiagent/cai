@@ -67,6 +67,8 @@ _PALETTE_COMMANDS = [
     ("system", "view / edit the system prompt"),
     ("sessions", "load a saved session"),
     ("config", "edit the live session settings"),
+    ("allow", "grant tools extra paths: comma list replaces, bare shows, '-' clears"),
+    ("disallow", "deny tools paths everywhere: comma list replaces, bare shows, '-' clears"),
     ("save", "save the session (optional path)"),
     ("load", "load a session file (path)"),
     ("clear", "clear the conversation view"),
@@ -75,7 +77,7 @@ _PALETTE_COMMANDS = [
 ]
 # commands that take an argument: picking them in the palette pre-fills command
 # mode (':save ') instead of dispatching immediately.
-_PALETTE_ARG_COMMANDS = ("save", "load")
+_PALETTE_ARG_COMMANDS = ("save", "load", "allow", "disallow")
 
 # how often the status thread resamples the signals and repaints the line.
 _REFRESH_INTERVAL = 0.1
@@ -472,6 +474,22 @@ class AgentClient:
 
     def set_model(self, model):
         self._call("set_model", model)
+
+    def get_paths(self):
+        """the live path policy: {"allowed": [...], "disallowed": [...]}."""
+        return self._call("get_paths") or {}
+
+    def set_paths(self, allowed=None, disallowed=None):
+        """change the path policy: each side is the flag's comma list ("" clears),
+        None leaves it alone. returns the error text, or None when it went."""
+        value = {}
+        value["allowed"] = allowed
+        value["disallowed"] = disallowed
+        with self._ctrl_lock:
+            ok, result, error = self._ctrl.control("set_paths", value)
+        if ok:
+            return None
+        return error or "set_paths failed"
 
     def set_system_prompt_base(self, base):
         self._call("set_system_prompt_base", base)
@@ -1215,6 +1233,31 @@ def _open_config(screen, client, cfg):
     screen.prompt_config_overlay(settings)
 
 
+def _paths_command(screen, client, head, arg):
+    """:allow / :disallow. bare shows that side's live list; a comma list of
+    files or directories (the flag's syntax) replaces it; a lone '-' clears
+    it. a missing entry is reported and changes nothing."""
+    side = "allowed"
+    if head == "disallow":
+        side = "disallowed"
+    if arg:
+        spec = arg
+        if arg == "-":
+            spec = ""
+        if head == "allow":
+            error = client.set_paths(allowed=spec)
+        else:
+            error = client.set_paths(disallowed=spec)
+        if error:
+            screen.write(f"[:{head} {error}]\n", kind=Screen.META, block=True)
+            return
+    roots = client.get_paths().get(side) or []
+    if not roots:
+        screen.write(f"[{side}: (none)]\n", kind=Screen.META, block=True)
+        return
+    screen.write(f"[{side}:]\n" + "\n".join(roots) + "\n", kind=Screen.META, block=True)
+
+
 def _save_session(screen, client, path, cfg):
     """save the agent (over the wire) to path, or its default <name>.flow when
     path is empty. the written path comes back from the control op."""
@@ -1519,11 +1562,12 @@ def _running_subagents(client):
     return running
 
 
-def _status_lines(model, skills, tools, subagents, user, steer):
+def _status_lines(model, skills, tools, subagents, allowed, disallowed, user, steer):
     """the status widget body: dim plain text, one heading per section and one
-    name per row beneath it; a section with nothing to list is left out. the
-    pending counts fold in as one row each. rows are padded to one width so
-    the block reads as a panel over the conversation."""
+    name per row beneath it; a section with nothing to list is left out (the
+    path grants and denies included, so they only show once set). the pending
+    counts fold in as one row each. rows are padded to one width so the block
+    reads as a panel over the conversation."""
     from cai.screen.ansi import SGR_DIM_GRAY, SGR_BOLD, SGR_RESET
 
     rows = []
@@ -1534,6 +1578,8 @@ def _status_lines(model, skills, tools, subagents, user, steer):
     sections.append(("skills", skills))
     sections.append(("tools", tools))
     sections.append(("sub-agents", subagents))
+    sections.append(("allowed paths", allowed))
+    sections.append(("disallowed paths", disallowed))
     for heading, names in sections:
         if not names: continue
         rows.append((heading, None))
@@ -1562,8 +1608,8 @@ def _status_lines(model, skills, tools, subagents, user, steer):
 
 class _StatusWidget:
     """the Tab-toggled 'status' hover widget: the agent's model, active skills
-    and tools (read over the wire), the live sub-agents (fed by the poll loop),
-    and the pending counts. toggle() shows/hides it and paints at once; while
+    and tools and path grants/denies (read over the wire), the live sub-agents
+    (fed by the poll loop), and the pending counts. toggle() shows/hides it and paints at once; while
     visible the poll loop refreshes it every tick so :skills / :tools / a model
     switch / a sub-agent starting show up without any call-site wiring. hidden
     is the start state every session."""
@@ -1602,12 +1648,15 @@ class _StatusWidget:
             model = self._client.get_info().get("model", "")
             skills = sorted(self._client.get_selected_skills())
             tools = sorted(self._client.get_selected_tools())
+            paths = self._client.get_paths()
         except OSError:
             return
+        allowed = paths.get("allowed") or []
+        disallowed = paths.get("disallowed") or []
         with self._lock:
             subagents = list(self._subagents)
         user, steer = self._pending.counts()
-        lines = _status_lines(model, skills, tools, subagents, user, steer)
+        lines = _status_lines(model, skills, tools, subagents, allowed, disallowed, user, steer)
         self._screen.add_widget("status", lines)
 
 
@@ -1868,6 +1917,14 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, u
             return False
         screen.clear_buffer()
         _replay_messages(screen, client.get_messages(), env.settings)
+        return False
+    if head == "allow" or head == "disallow":
+        # set_paths is a deferred op (servers restart between turns), so a
+        # busy agent would hold the reply until the turn ends.
+        if arg and screen._busy:
+            screen.write(f"[busy — :{head} when idle]\n", kind=Screen.META, block=True)
+            return False
+        _paths_command(screen, client, head, arg)
         return False
     if head == "save":
         path = ""

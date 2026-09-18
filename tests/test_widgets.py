@@ -221,7 +221,7 @@ def test_prompt_entries_skip_blanks():
 
 
 def test_status_lines_sections_and_padding():
-    lines = _status_lines("gpt-x", ["git"], ["fs__read"], [], 0, 0)
+    lines = _status_lines("gpt-x", ["git"], ["fs__read"], [], [], [], 0, 0)
     plain = []
     for line in lines:
         plain.append(ansi_strip(line))
@@ -240,10 +240,19 @@ def test_status_lines_sections_and_padding():
 
 def test_status_lines_pending_and_subagents_and_empty():
     plain = []
-    for line in _status_lines("", [], [], ["scout"], 2, 1):
+    for line in _status_lines("", [], [], ["scout"], [], [], 2, 1):
         plain.append(ansi_strip(line).strip())
     assert plain == ["sub-agents", "scout", "pending", "1 steering", "2 queued"]
-    assert ansi_strip(_status_lines("", [], [], [], 0, 0)[0]).strip() == "(nothing active)"
+    assert ansi_strip(_status_lines("", [], [], [], [], [], 0, 0)[0]).strip() == "(nothing active)"
+
+
+def test_status_lines_paths_show_only_when_set():
+    plain = []
+    for line in _status_lines("", [], [], [], ["/data"], ["/data/secret.txt"], 0, 0):
+        plain.append(ansi_strip(line).strip())
+    assert plain == ["allowed paths", "/data", "disallowed paths", "/data/secret.txt"]
+    text = " ".join(_status_lines("m", [], [], [], [], [], 0, 0))
+    assert "paths" not in text
 
 
 class _StatusClient:
@@ -251,6 +260,7 @@ class _StatusClient:
         self.model = "m1"
         self.skills = ["python"]
         self.tools = ["echo"]
+        self.allowed = []
 
     def get_info(self):
         return {"model": self.model}
@@ -260,6 +270,9 @@ class _StatusClient:
 
     def get_selected_tools(self):
         return list(self.tools)
+
+    def get_paths(self):
+        return {"allowed": list(self.allowed), "disallowed": []}
 
 
 def test_status_widget_toggles_and_refreshes_only_while_visible():
@@ -274,12 +287,15 @@ def test_status_widget_toggles_and_refreshes_only_while_visible():
     assert widget.visible is True
     text = " ".join(ansi_strip(l) for l in host.widgets["status"])
     assert "m1" in text and "python" in text and "echo" in text
+    assert "allowed paths" not in text
     client.skills = ["python", "fs"]
+    client.allowed = ["/data"]
     widget.set_subagents(["scout"])
     pending.user_queued()
     widget.refresh()
     text = " ".join(ansi_strip(l) for l in host.widgets["status"])
     assert "fs" in text and "scout" in text and "1 queued" in text
+    assert "allowed paths" in text and "/data" in text
     widget.toggle()
     assert widget.visible is False
     assert "status" not in host.widgets

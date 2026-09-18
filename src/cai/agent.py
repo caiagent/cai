@@ -34,6 +34,7 @@ import tempfile
 import threading
 
 from cai import config
+from cai import paths
 from cai import usage
 from cai.api import OpenAiApi
 from cai.environment import Environment
@@ -341,6 +342,30 @@ class Agent:
         """switch the model used for the next run; an empty value is ignored."""
         if not model: return
         self.model = model
+
+    def get_paths(self):
+        """the live path policy: the CAI_ALLOWED_PATHS grants and the
+        CAI_DISALLOWED_PATHS denies, realpath'd."""
+        value = {}
+        value["allowed"] = paths.allowed_paths()
+        value["disallowed"] = paths.disallowed_paths()
+        return value
+
+    def set_paths(self, allowed=None, disallowed=None):
+        """change the path policy at runtime: each given spec is the flag's
+        comma list (empty clears), None leaves that side alone. publishes the
+        vars (process-wide, like the flags) and restarts this agent's MCP
+        servers so they respawn under the new policy; safe_path, the python
+        tool child and the {{allowed_paths}} slot read the vars live. raises
+        ValueError on a missing entry, changing nothing."""
+        pending = []
+        if allowed is not None:
+            pending.append(("CAI_ALLOWED_PATHS", paths.resolve_spec(allowed)))
+        if disallowed is not None:
+            pending.append(("CAI_DISALLOWED_PATHS", paths.resolve_spec(disallowed)))
+        for var, roots in pending:
+            paths.export(var, roots)
+        self.tools_registry.restart_servers()
 
     def get_messages(self):
         """the agent's live conversation list."""

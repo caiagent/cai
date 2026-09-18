@@ -697,6 +697,14 @@ class ToolsRegistry:
             except Exception:
                 log.exception("closing MCP server %r failed", server.label)
 
+    def restart_servers(self):
+        """drop every connected MCP server so the next dispatch spawns it
+        afresh from the current os.environ - how a runtime change to the
+        CAI_ALLOWED_PATHS / CAI_DISALLOWED_PATHS policy reaches a long-lived
+        server that snapshotted its env at spawn. selections are untouched."""
+        self.close()
+        self._mcp_servers = {}
+
 
 def _mcp_server_path(mcp_name, dirs):
     """resolve <mcp_name>.py to a source file, searching `dirs` in order (the

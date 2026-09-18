@@ -71,7 +71,8 @@ _DEFERRED_OPS = ("set_messages",
                  "clone",
                  "set_selected_tools",
                  "set_selected_skills",
-                 "set_system_prompt_base")
+                 "set_system_prompt_base",
+                 "set_paths")
 
 
 def _tool_names(tools):
@@ -559,6 +560,17 @@ class WiredAgent:
             return True, None, None
         if op == "set_system_prompt_base":
             agent.set_system_prompt_base(value)
+            return True, None, None
+        if op == "get_paths":
+            return True, agent.get_paths(), None
+        if op == "set_paths":
+            # {"allowed": spec|None, "disallowed": spec|None}; a bad entry is
+            # a plain failed result (the user typed it), not a logged raise.
+            value = value or {}
+            try:
+                agent.set_paths(value.get("allowed"), value.get("disallowed"))
+            except ValueError as e:
+                return False, None, str(e)
             return True, None, None
         if op == "get_info":
             children = list(agent.children)
