@@ -35,9 +35,9 @@ def test_read_text_still_works():
     with open("a.txt", "w") as f:
         f.write("line one\nline two\n")
     out = fs.read_file("a.txt")
-    assert out == "line one\nline two\n\n[lines 1-2 of 2]"
+    assert out == "1\tline one\n2\tline two\n\n[lines 1-2 of 2]"
     out = fs.read_file("a.txt", line_start=2, line_end=2)
-    assert out == "line two\n\n[lines 2-2 of 2]"
+    assert out == "2\tline two\n\n[lines 2-2 of 2]"
 
 
 def test_read_binary_returns_xxd_style_hexdump():

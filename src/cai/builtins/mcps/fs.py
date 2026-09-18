@@ -229,9 +229,11 @@ def read_file(file_path: str,
     """Read a file: text as lines, binary (NUL in first 8KB) as an xxd-style
     hexdump. Only the requested range is returned (the rest of a text file is
     scanned just to count its lines), so any file size is safe. With no range
-    arguments: text shows 200 lines, binary the first 3200 bytes. A text read
-    ends with a '[lines A-B of N]' footer, so the caller knows how much of the
-    file it saw.
+    arguments: text shows 200 lines, binary the first 3200 bytes. Each text
+    line is prefixed with its 1-based number and a tab (e.g. '12\tfoo = 1');
+    the prefix is not part of the file, so strip it before quoting content to
+    edit_file. A text read ends with a '[lines A-B of N]' footer, so the caller
+    knows how much of the file it saw.
 
     Args:
         file_path:    Path to the file.
@@ -290,7 +292,13 @@ def _read_text(safe, line_start, line_end):
     if not out:
         return f"[no lines at {start}; file has {total} lines]"
     shown = start + len(out) - 1
-    text = "".join(out)
+    width = len(str(shown))
+    numbered = []
+    number = start
+    for line in out:
+        numbered.append(f"{number:>{width}}\t{line}")
+        number += 1
+    text = "".join(numbered)
     if shown < total:
         return text + f"\n[lines {start}-{shown} of {total}; call again with line_start={shown + 1}]"
     return text + f"\n[lines {start}-{shown} of {total}]"

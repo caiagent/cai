@@ -6,8 +6,10 @@ a wire client through AgentClient - the TUI never touches the agent object once 
 is served, so the same client surface will drive a remote agent over --attach. The
 main thread owns the terminal and blocks in Screen.prompt(); a worker thread
 SUBMITs prompts over the client's streaming connection and renders the EVENT/RESULT
-stream into the viewport. Control ops (messages, tools, skills, model, save, load)
-go over a separate, lock-guarded control connection.
+stream into the viewport - draining it at all times, so a turn another client
+submits or steers on the same socket renders here too. Control ops (messages,
+tools, skills, model, save, load) go over a separate, lock-guarded control
+connection.
 
 The status line follows the reference's pattern: the worker only updates raw
 signals (busy, the kind of the last delta, when the last token arrived); a
@@ -27,6 +29,7 @@ import json
 import logging
 import os
 import queue
+import select
 import threading
 import time
 
@@ -81,6 +84,9 @@ _PALETTE_ARG_COMMANDS = ("save", "load", "allow", "disallow")
 
 # how often the status thread resamples the signals and repaints the line.
 _REFRESH_INTERVAL = 0.1
+# how long the worker waits on the stream wire before checking the jobs queue
+# for a local prompt to submit.
+_PUMP_TIMEOUT = 0.1
 # a stream is "stalled" once this many seconds pass with no new token; the status
 # then falls back from responding/reasoning to waiting.
 _STALL_SECONDS = 3.0
@@ -632,13 +638,16 @@ class _Jobs:
 
 
 class _Worker(threading.Thread):
-    """drains submitted prompts and streams each run into the screen, all over the
-    wire client.
+    """pumps the agent's stream into the screen, all over the wire client.
 
-    one job at a time: the queue serialises runs so the agent is never driven
-    concurrently. set_busy() brackets each run so the screen and the Ctrl-C
-    interrupt gate know a response is in flight; the _Status signals it updates
-    drive the status line, painted by the status thread."""
+    the served agent broadcasts every turn - whoever submitted it - as EVENTs
+    closed by a RESULT, so the worker drains the stream wire at all times, not
+    only during a turn it started: a prompt or steer sent by another client on
+    the socket renders here exactly like a local one (the host emits the USER
+    event at turn start). busy is a fact of the wire: the first event of a turn
+    while idle marks the screen and status busy, the RESULT marks them idle
+    again. a local prompt is submitted only when nothing is in flight, so the
+    jobs queue serialises runs and never drives the agent concurrently."""
 
     def __init__(self, client, screen, jobs, stop, status, settings, pending):
         super().__init__(daemon=True, name="cai-tui-worker")
@@ -653,26 +662,107 @@ class _Worker(threading.Thread):
         self._sample_tokens = 0
         self._sample_chars = 0
         self._interrupted = False
+        self._in_flight = False
 
     def mark_interrupted(self):
-        """flag the in-flight run as Ctrl-C'd so _run_one notes it once the run
-        unwinds. set from the key thread; read on the worker thread."""
+        """flag the in-flight run as Ctrl-C'd so the RESULT notes it once the
+        run unwinds. set from the key thread; read on the worker thread."""
         self._interrupted = True
 
     def run(self):
         while not self._stop_event.is_set():
-            try:
-                text = self._jobs.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if text is None:
+            if not self._in_flight:
+                if not self._take_job():
+                    break
+            if not self._pump():
                 break
-            # a real user turn was counted as pending when it entered the queue;
-            # now that it starts running it is in flight, not pending. _CONTINUE
-            # turns were never counted, so they never decrement.
-            if text is not _CONTINUE:
+
+    def _take_job(self):
+        """submit the next queued local prompt, if any. False on the stop
+        sentinel."""
+        try:
+            text = self._jobs.get(timeout=0)
+        except queue.Empty:
+            return True
+        if text is None:
+            return False
+        try:
+            if text is _CONTINUE:
+                self._client.continue_run()
+            else:
+                # a real user turn was counted as pending when it entered the
+                # queue; now that it starts running it is in flight, not pending.
+                # _CONTINUE turns were never counted, so they never decrement.
                 self._pending.user_started()
-            self._run_one(text)
+                self._client.submit(text)
+        except OSError as e:
+            self._transcript.note(f"[error: {e}]\n", Screen.ERROR)
+            return True
+        # busy at once, before the first event lands, so the steer / Ctrl-C
+        # gates see the turn from the moment it was sent.
+        self._begin()
+        return True
+
+    def _pump(self):
+        """wait up to _PUMP_TIMEOUT for the stream and render what arrived.
+        False once the wire is gone (EOF or a dead socket)."""
+        try:
+            readable, _, _ = select.select([self._client.stream.channel], [], [], _PUMP_TIMEOUT)
+        except (OSError, ValueError):
+            readable = None
+        if readable is None:
+            self._lost(None)
+            return False
+        if not readable:
+            return True
+        try:
+            messages = self._client.recv()
+        except OSError as e:
+            self._lost(e)
+            return False
+        if messages is None:
+            self._lost(None)
+            return False
+        for msg in messages:
+            self._handle(msg)
+        return True
+
+    def _handle(self, msg):
+        if self._client.stream.answer(msg, self._ui):
+            return
+        kind = msg.get("type")
+        if kind == Wire.EVENT:
+            self._begin()
+            event = Wire.event_from_dict(msg["event"])
+            self._transcript.event(event)
+            self._update_status(event)
+            return
+        if kind == Wire.RESULT:
+            self._end(msg.get("text"))
+
+    def _begin(self):
+        if self._in_flight: return
+        self._in_flight = True
+        self._interrupted = False
+        self._screen.set_busy(True)
+        self._status.busy()
+
+    def _end(self, result):
+        if result and result.startswith("Error:"):
+            self._transcript.note(f"[{result}]\n", Screen.ERROR)
+        if self._interrupted:
+            self._transcript.note("[interrupted]\n", Screen.META)
+        self._in_flight = False
+        self._screen.set_busy(False)
+        self._status.idle()
+
+    def _lost(self, error):
+        """the stream is gone: close out an in-flight turn and, unless we are
+        shutting down anyway, say so."""
+        if self._in_flight:
+            self._end(None)
+        if error is not None and not self._stop_event.is_set():
+            self._transcript.note(f"[error: {error}]\n", Screen.ERROR)
 
     def _update_status(self, event):
         if event.type == EventType.CONTENT:
@@ -696,43 +786,6 @@ class _Worker(threading.Thread):
         self._sample_tokens = tokens
         self._sample_chars = usage.message_chars(messages)
         self._status.set_sample(self._sample_tokens, self._sample_chars)
-
-    def _run_one(self, text):
-        self._interrupted = False
-        self._screen.set_busy(True)
-        self._status.busy()
-        ui = self._ui
-        try:
-            if text is _CONTINUE:
-                self._client.continue_run()
-            else:
-                self._client.submit(text)
-            result = None
-            while result is None:
-                messages = self._client.recv()
-                if messages is None:
-                    break
-                for msg in messages:
-                    if self._client.stream.answer(msg, ui):
-                        continue
-                    kind = msg.get("type")
-                    if kind == Wire.EVENT:
-                        event = Wire.event_from_dict(msg["event"])
-                        self._transcript.event(event)
-                        self._update_status(event)
-                        continue
-                    if kind == Wire.RESULT:
-                        result = msg.get("text")
-                        break
-            if result and result.startswith("Error:"):
-                self._transcript.note(f"[{result}]\n", Screen.ERROR)
-            if self._interrupted:
-                self._transcript.note("[interrupted]\n", Screen.META)
-        except OSError as e:
-            self._transcript.note(f"[error: {e}]\n", Screen.ERROR)
-        finally:
-            self._screen.set_busy(False)
-            self._status.idle()
 
 
 def _open_messages(screen, client, status):
