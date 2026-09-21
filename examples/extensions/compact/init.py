@@ -38,7 +38,7 @@ def auto_compact(ctx: cai.HookContext):
         return
     ctx.messages[:] = folded
 
-    agent = (ctx.data or {}).get("agent")
+    agent = cai.current_agent()
     if agent is not None:
         agent.set_messages(ctx.messages)
     ctx.ui.status(f"auto-compacted to {len(folded)} messages")

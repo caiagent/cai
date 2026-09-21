@@ -244,7 +244,7 @@ class Agent:
         # a saved session does not keep it.
         self._scratch = scratch
         self._scratch_owned = False
-        self.tools_registry = ToolsRegistry(self.env, scratch=self.scratch)
+        self.tools_registry = ToolsRegistry(self.env, agent=self)
 
         # registers the env's agent-bound tools (the sub-agent tools by default).
         # override=True so these bind to *this* agent even if a tool of the same
@@ -339,9 +339,29 @@ class Agent:
             self.skills_registry.add(name)
 
     def set_model(self, model):
-        """switch the model used for the next run; an empty value is ignored."""
+        """switch the model; an empty value is ignored. the loop reads the model
+        through _current_model before every call, so a switch from a hook
+        mid-run (before_turn, after_turn) applies to the very next call."""
         if not model: return
         self.model = model
+
+    def _current_model(self):
+        """the live model getter handed to call_llm in place of a fixed id."""
+        return self.model
+
+    def _current_tools(self):
+        """the live tool-schema getter handed to call_llm in place of a fixed
+        list: the registry's current selection, so set_selected_tools from a
+        hook mid-run (before_turn, after_turn) is what the next call offers.
+        dispatch_selected is live the same way - it refuses a deselected tool."""
+        return self.tools_registry.tools
+
+    def _current_system_prompt(self):
+        """the live system-prompt getter handed to call_llm in place of a fixed
+        string: base + active skills, slots filled on each read, so
+        set_system_prompt_base / set_selected_skills from a hook mid-run and a
+        slot filler's latest state reach the next call."""
+        return self.system_prompt
 
     def get_paths(self):
         """the live path policy: the CAI_ALLOWED_PATHS grants and the
@@ -651,9 +671,8 @@ class Agent:
             if prompt is not None:
                 self.messages.append({"role": "user", "content": prompt})
                 yield Event(type=EventType.USER, text=prompt)
-            skills_prompt = self.skills_registry.system_prompt
-            system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
-            schemas = self.tools_registry.tools
+            system_prompt = self._current_system_prompt
+            schemas = self._current_tools
             dispatch = self.tools_registry.dispatch_selected
             if self.tool_result_max_chars:
                 dispatch = _trim_dispatch(dispatch, self.tool_result_max_chars)
@@ -663,7 +682,7 @@ class Agent:
             if strict_format:
                 def make_stream(strict_system_prompt):
                     return call_llm(self.messages,
-                                    self.model,
+                                    self._current_model,
                                     self.api,
                                     system_prompt=strict_system_prompt,
                                     tools=schemas,
@@ -685,7 +704,7 @@ class Agent:
                 text = yield from self._noting_usage(strict_stream)
                 return text
             run_stream = call_llm(self.messages,
-                                  self.model,
+                                  self._current_model,
                                   self.api,
                                   system_prompt=system_prompt,
                                   tools=schemas,

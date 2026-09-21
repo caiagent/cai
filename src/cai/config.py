@@ -21,6 +21,12 @@ Optional keys (read via load_optional, never required) may also appear:
                          python tool runs snippets under, instead of the managed
                          ~/.config/cai/venv. cai never builds, rebuilds or
                          deletes a user-supplied env.
+  system_one_model     - the System One decision model `cai --system-one`
+                         and cai.decide ask (e.g. "jev-latest"), served at `base_url` +
+                         /systemone - or, when `base_url` is on openrouter.ai,
+                         at its Decisions endpoint (model "~typesafe/jev-latest").
+                         no default: both refuse to run without it (the CLI
+                         also takes --model).
 
 Every field, required or optional, can be SHADOWED from init.py: a cai.settings
 attribute of the same name that is not None wins over the config.json value

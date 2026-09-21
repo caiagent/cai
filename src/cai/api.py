@@ -6,6 +6,7 @@ import logging
 import warnings
 import threading
 import requests
+from urllib.parse import urlsplit, urlunsplit
 from urllib3.exceptions import InsecureRequestWarning
 
 log = logging.getLogger("cai")
@@ -20,13 +21,13 @@ _POLL_TICK = 0.2
 
 
 class ApiError(Exception):
-    """a chat request failed for good: a transport error, a bad HTTP status, or
-    an unusable response body - after the transient cases (network errors, 429,
+    """a request failed for good: a transport error, a bad HTTP status, or an
+    unusable response body - after the transient cases (network errors, 429,
     5xx) were retried. `status` carries the HTTP status when one was received.
 
-    this is the api layer's whole error surface: chat() raises it instead of
-    returning a sentinel, so a failed call can never read as the model
-    answering with an empty string."""
+    this is the api layer's whole error surface: OpenAiApi.chat() and
+    SystemOneApi.system_one() raise it instead of returning a sentinel, so a
+    failed call can never read as the model answering with an empty string."""
 
     def __init__(self, message, status=None):
         super().__init__(message)
@@ -536,3 +537,109 @@ class OpenAiApi:
             flight.queue.put(('done', None))
         except Exception as e:
             flight.queue.put(('error', e))
+
+
+class SystemOneApi:
+    """A minimal System One client - the TypeSafe decision API (Jev): one HTTP
+    POST that returns a typed answer per question, never text. the same
+    bottom-of-the-stack contract as OpenAiApi - it speaks the wire format,
+    retries the transient failures, and raises ApiError for everything it
+    cannot recover - but a different protocol, so a different class.
+
+    the endpoint is base_url + /systemone (TypeSafe's own path, which the open
+    reproductions copy). OpenRouter serves the identical body and response at
+    its Decisions endpoint instead, /api/alpha/decisions on the same host, so
+    a base_url on openrouter.ai is rerouted there - the one provider shape
+    handled, the way get_models knows OpenRouter's /models."""
+
+    def __init__(self,
+                 base_url,
+                 api_key,
+                 ssl_verify=True,
+                 timeout=(10, 120),
+                 retries=3):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.url = f"{base_url}/systemone"
+        parts = urlsplit(base_url)
+        if parts.hostname == "openrouter.ai":
+            self.url = urlunsplit((parts.scheme, parts.netloc, "/api/alpha/decisions", "", ""))
+        self.ssl_verify = ssl_verify
+        if not ssl_verify:
+            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+        if isinstance(timeout, (list, tuple)):
+            timeout = tuple(timeout)
+        self.timeout = timeout
+        self.retries = max(1, retries)
+
+    def system_one(self, state, questions, model):
+        """One System One request: a POST to self.url carrying a `state` (a
+        string, or any JSON object/array) and a map of typed questions about it,
+        answered all at once. no messages, no streaming, no tools.
+
+        `questions` maps a caller-chosen name to one question dict in the wire
+        shape - 'noul' (yes/no), 'choice' (one of named options) or 'score' (an
+        ordered scale), each with 'instructions' and 'criteria':
+
+            {"risky": {"type": "noul",
+                       "instructions": "Would this tool call damage user data?"},
+             "team":  {"type": "choice",
+                       "instructions": "Which team should handle this?",
+                       "criteria": {"billing": "payments, refunds",
+                                    "technical": "bugs, outages"}},
+             "anger": {"type": "score",
+                       "instructions": "How frustrated is the customer?",
+                       "criteria": ["calm", "frustrated", "very angry"]}}
+
+        returns (answers, usage): `answers` is the wire map keyed by the same
+        names - {"type": "noul", "noul": 0.92}, {"type": "choice", "choice":
+        "technical", "probabilities": {...}, "confidence": 0.82}, {"type":
+        "score", "score": 1.6, "legend": {...}, "probabilities": {...},
+        "confidence": 0.78} - and `usage` the token counts. transient failures
+        (network errors, 429/5xx) are retried up to self.retries attempts with a
+        short doubling backoff; anything else raises ApiError."""
+        url = self.url
+        headers = {}
+        headers['Authorization'] = f"Bearer {self.api_key}"
+        headers['Content-Type'] = "application/json"
+
+        data = {}
+        data['model'] = model
+        data['state'] = state
+        data['questions'] = questions
+
+        attempt = 0
+        while True:
+            attempt += 1
+            status = None
+            try:
+                r = requests.post(url,
+                                  headers=headers,
+                                  json=data,
+                                  timeout=self.timeout,
+                                  verify=self.ssl_verify)
+            except requests.RequestException as e:
+                error = f"request {url} failed: {e}"
+            else:
+                if r.status_code == 200:
+                    break
+                status = r.status_code
+                error = f"request {url} failed with {status}: {r.text[:300]}"
+                r.close()
+            if not _retryable(status) or attempt >= self.retries:
+                raise ApiError(error, status=status)
+            delay = _RETRY_BACKOFF * (2 ** (attempt - 1))
+            log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
+                        error, delay, attempt, self.retries)
+            time.sleep(delay)
+
+        try:
+            result = r.json()
+        except ValueError as e:
+            raise ApiError(f"request {url} returned invalid JSON: {e}")
+
+        answers = result.get('answers')
+        if not isinstance(answers, dict):
+            raise ApiError(f"request {url} returned no answers")
+        usage = result.get('usage', {})
+        return answers, usage

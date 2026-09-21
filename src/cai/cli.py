@@ -15,6 +15,13 @@ Two stream modes ride the same flags: --tail follows a live served agent's
 conversation read-only over its unix socket (cai.tail), and --watch runs the
 prompt as a one-shot agent each time piped stdin settles (cai.watch).
 
+--system-one skips the agent entirely: the prompt is one typed question for a
+System One decision model (cai.api.SystemOneApi, model from the config's
+`system_one_model`), piped stdin or --file is the state it judges, and the
+answer prints as one line - the value, a tab, the confidence. --choice / --score
+pick the question type (neither: a yes/no noul); --line-by-line asks it of
+every input line.
+
 The prompt is given via -p/--prompt or after a '--' separator (so --skill/--tool
 can each take several values without swallowing it): `cai --skill fs -- fix x`.
 
@@ -26,6 +33,7 @@ stdin/stdout behaviour:
 import os
 import argparse
 import sys
+import threading
 from importlib.metadata import version, PackageNotFoundError
 
 # optional: real tab completion when argcomplete is installed (pip install
@@ -318,6 +326,26 @@ def build_parser():
                         help="how many agents run in parallel (default 1): "
                              "--line-by-line workers, or in-flight --watch runs "
                              "(spawning past the limit kills the oldest)")
+    parser.add_argument("--system-one",
+                        action="store_true",
+                        help="ask a System One decision model (config "
+                             "`system_one_model`) one typed question instead of "
+                             "running an agent: the prompt is the question, "
+                             "piped stdin or --file is the state; prints the "
+                             "answer, a tab, and the confidence")
+    parser.add_argument("--choice",
+                        nargs="+",
+                        default=None,
+                        metavar="NAME[=DESCRIPTION]",
+                        help="--system-one: pick one of these named options "
+                             "(a choice question); '=' adds the option's description")
+    parser.add_argument("--score",
+                        nargs="+",
+                        default=None,
+                        metavar="LEVEL",
+                        help="--system-one: rate on this ordered scale, lowest "
+                             "level first (a score question); each item describes "
+                             "its level")
 
     # subcommands. the prompt is pulled out before argparse (see _split_dashdash)
     # so the top level keeps no free positional that would clash with these.
@@ -371,6 +399,147 @@ def _resolve_system_prompt(args, parser):
     if not parts:
         return None
     return "\n\n".join(parts)
+
+
+def _open_line_source(args, parser):
+    """the input --line-by-line iterates: --file's lines when given (the file
+    IS the input, not context), else piped stdin's - consumed as a stream, so
+    runs start on the first line while the producer is still writing."""
+    if not args.file:
+        return sys.stdin
+    try:
+        return open(args.file)
+    except OSError as e:
+        parser.error(f"cannot read --file: {e}")
+
+
+def _nonblank_lines(source):
+    for raw in source:
+        line = raw.rstrip("\r\n")
+        if not line.strip(): continue
+        yield line
+
+
+def _system_one_question(args, prompt):
+    """the one wire question the flags describe: --choice makes it a choice
+    (NAME=DESCRIPTION options, a bare NAME sends no description), --score a
+    score (ordered level descriptions), neither a noul. the prompt is its
+    instructions."""
+    question = {}
+    if args.choice is not None:
+        criteria = {}
+        for option in args.choice:
+            name, sep, description = option.partition("=")
+            if not sep:
+                description = None
+            criteria[name] = description
+        question['type'] = "choice"
+        question['instructions'] = prompt
+        question['criteria'] = criteria
+        return question
+    if args.score is not None:
+        question['type'] = "score"
+        question['instructions'] = prompt
+        question['criteria'] = list(args.score)
+        return question
+    question['type'] = "noul"
+    question['instructions'] = prompt
+    return question
+
+
+def _system_one_answer_line(answer):
+    """one output line per answer: the value, a tab, the confidence. a noul
+    has no separate confidence - its value IS the probability - so it prints
+    alone."""
+    kind = answer.get('type')
+    if kind == "noul":
+        return f"{answer.get('noul')}"
+    if kind == "choice":
+        return f"{answer.get('choice')}\t{answer.get('confidence')}"
+    if kind == "score":
+        return f"{answer.get('score')}\t{answer.get('confidence')}"
+    return str(answer)
+
+
+class SystemOneRun:
+    """the slice of a Run that lines.run drives, over one System One call:
+    iterating it makes the request (yielding no events - there is no stream),
+    after which .text is the answer line. interrupt and close exist for the
+    contract; a single short POST has nothing to wind down."""
+
+    def __init__(self, decide, state):
+        self.decide = decide
+        self.state = state
+        self.text = ""
+        self.interrupt = threading.Event()
+
+    def __iter__(self):
+        self.text = self.decide(self.state)
+        return iter(())
+
+    def close(self):
+        return
+
+
+def _run_system_one(args, prompt, parser):
+    """the --system-one mode: one question, built from the flags, asked of the
+    state - every input line in turn under --line-by-line (lines.run schedules
+    the calls, --cores at a time), else the whole of --file or piped stdin.
+    the call is cai.decide's; its model and api are resolved once, up front,
+    so a missing `system_one_model` fails before any line is read."""
+    from cai import decision
+    from cai.api import ApiError
+
+    model = args.model
+    if model is None:
+        try:
+            model = decision.default_model()
+        except ValueError as e:
+            parser.error(f"{e} or pass --model")
+    api = decision.default_api()
+    questions = {}
+    questions['answer'] = _system_one_question(args, prompt)
+
+    def _decide(state):
+        answers, usage = decision.decide(state, questions, model=model, api=api)
+        answer = answers.get('answer')
+        if answer is None:
+            raise ApiError("the model returned no answer to the question")
+        return _system_one_answer_line(answer)
+
+    if args.line_by_line:
+        from cai import lines
+
+        source = _open_line_source(args, parser)
+
+        def _make_run(line):
+            return SystemOneRun(_decide, line)
+
+        try:
+            return lines.run(_make_run,
+                             _nonblank_lines(source),
+                             cores=args.cores,
+                             show_reasoning=False)
+        finally:
+            if source is not sys.stdin:
+                source.close()
+
+    if args.file:
+        try:
+            with open(args.file) as f:
+                state = f.read()
+        except OSError as e:
+            parser.error(f"cannot read --file: {e}")
+    else:
+        state = sys.stdin.read()
+    try:
+        line = _decide(state)
+    except ApiError as e:
+        print(e, file=sys.stderr)
+        return 1
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    return 0
 
 
 def _build_messages(args, prompt, parser):
@@ -534,6 +703,25 @@ def main(argv=None):
         if args.cores < 1:
             parser.error("--cores must be >= 1")
 
+    # --system-one preconditions, same early-fail treatment: a headless mode
+    # whose prompt IS the question and whose input IS the state.
+    if args.system_one:
+        if args.interactive or args.continue_session or args.sessions:
+            parser.error("--system-one cannot combine with -i/--continue/--sessions")
+        if args.watch:
+            parser.error("--system-one cannot combine with --watch")
+        if args.prompt is None and dashdash_prompt is None:
+            parser.error("--system-one needs a question (-p/--prompt or after '--')")
+        if args.choice is not None and args.score is not None:
+            parser.error("--choice and --score are mutually exclusive")
+        if args.score is not None and len(args.score) < 2:
+            parser.error("--score needs at least two levels")
+        if args.file is None and sys.stdin.isatty():
+            parser.error("--system-one reads --file or piped stdin as the state, "
+                         "but stdin is a terminal and no --file was given")
+    elif args.choice is not None or args.score is not None:
+        parser.error("--choice/--score only apply with --system-one")
+
     # --cwd: move the whole process before any config/file/tool work, so --file,
     # the fs tool sandbox (which resolves against os.getcwd()) and every other
     # tool see paths relative to the requested directory.
@@ -580,6 +768,8 @@ def main(argv=None):
         return 1
 
     prompt = _resolve_prompt(args, dashdash_prompt, parser)
+    if args.system_one:
+        return _run_system_one(args, prompt, parser)
     system_prompt = _resolve_system_prompt(args, parser)
 
     # resume flags. --continue resolves the most recent saved session up front;
@@ -686,22 +876,7 @@ def main(argv=None):
     if args.line_by_line:
         from cai import lines
 
-        # the input to iterate: --file's lines when given (the file IS the
-        # input, not context), else piped stdin's - consumed as a stream, so
-        # runs start on the first line while the producer is still writing.
-        if args.file:
-            try:
-                source = open(args.file)
-            except OSError as e:
-                parser.error(f"cannot read --file: {e}")
-        else:
-            source = sys.stdin
-
-        def _line_source():
-            for raw in source:
-                line = raw.rstrip("\r\n")
-                if not line.strip(): continue
-                yield line
+        source = _open_line_source(args, parser)
 
         def _make_line_run(line):
             messages = []
@@ -711,7 +886,7 @@ def main(argv=None):
 
         try:
             return lines.run(_make_line_run,
-                             _line_source(),
+                             _nonblank_lines(source),
                              cores=args.cores,
                              show_reasoning=env.settings.show_reasoning)
         finally:

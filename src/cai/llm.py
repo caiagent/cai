@@ -5,7 +5,8 @@ feed the results back -> repeat until the model answers with no tool calls (or
 max_steps). It is a *generator*: it yields cai.events.Event objects as output
 streams in, and returns the final answer string as the generator's return value
 (StopIteration.value). Hooks fire at the documented points so a caller can veto
-a tool, rewrite the final answer, or react to a finished turn.
+a tool, rewrite the final answer, or react to a finished turn - a hook acts by
+returning a cai.HookResult (see cai.hooks), or observes by returning nothing.
 
   gen = call_llm(messages, model, api, tools=..., tools_dispatch=...)
   try:
@@ -29,7 +30,8 @@ import threading
 
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, RunGate, ToolCall
-from cai.hooks import reset_gate, set_gate
+from cai.hooks import current_model, current_system_prompt, current_tools
+from cai.hooks import reset_gate, set_gate, veto_message
 from cai.ui import NULL_UI, reset_ui, set_ui
 
 
@@ -195,8 +197,8 @@ def _turn(api,
     the api layer - it never reads as an empty answer."""
     if not stream:
         content, reasoning, tool_calls, usage = api.chat(call_messages,
-                                                         model,
-                                                         tools=tools,
+                                                         current_model(model),
+                                                         tools=current_tools(tools),
                                                          tool_choice=tool_choice,
                                                          reasoning_effort=reasoning_effort,
                                                          temperature=temperature,
@@ -212,8 +214,8 @@ def _turn(api,
     tool_calls = None
     usage = {}
     stream_gen = api.chat(call_messages,
-                          model,
-                          tools=tools,
+                          current_model(model),
+                          tools=current_tools(tools),
                           tool_choice=tool_choice,
                           reasoning_effort=reasoning_effort,
                           temperature=temperature,
@@ -317,19 +319,16 @@ def _handle_tool_calls(calls,
             tool_call = ToolCall(name=name, arguments=arguments, args=args, id=call_id)
             hook_ctx = HookContext(event=HookEvent.BEFORE_TOOL_CALL,
                                    messages=messages,
-                                   model=model,
+                                   model=current_model(model),
                                    config=config,
                                    ui=ui,
                                    usage=usage,
                                    tool_call=tool_call,
                                    data=_merge_data(hooks_data))
-            vetoed = False
-            for response in hooks.fire(HookEvent.BEFORE_TOOL_CALL, hook_ctx):
-                if response is False:
-                    vetoed = True
+            before = hooks.fire(HookEvent.BEFORE_TOOL_CALL, hook_ctx)
 
-            if vetoed:
-                result = f"Error: tool '{name}' was aborted by a before_tool_call hook"
+            if before.vetoed:
+                result = veto_message(name, before.reason)
                 log.info("tool call: %s vetoed by hook", name)
             elif not call['valid']:
                 result = f"Error: arguments for tool '{name}' were not valid JSON: {arguments}"
@@ -352,7 +351,7 @@ def _handle_tool_calls(calls,
 
             mutated_ctx = HookContext(event=HookEvent.MESSAGES_MUTATED,
                                       messages=messages,
-                                      model=model,
+                                      model=current_model(model),
                                       config=config,
                                       ui=ui,
                                       data=_merge_data(hooks_data, name=name, id=call_id))
@@ -360,7 +359,7 @@ def _handle_tool_calls(calls,
 
             after_ctx = HookContext(event=HookEvent.AFTER_TOOL_CALL,
                                     messages=messages,
-                                    model=model,
+                                    model=current_model(model),
                                     config=config,
                                     ui=ui,
                                     usage=usage,
@@ -371,6 +370,41 @@ def _handle_tool_calls(calls,
     finally:
         reset_ui(ui_token)
         reset_gate(token)
+
+
+def _finish(messages, model, hooks, config, ui, usage, hooks_data, content, reasoning):
+    """the final-answer path, shared by a plain answer and a hook's finish: let
+    on_final_response hooks rewrite `content`, append it to the transcript,
+    fire after_run, and return it."""
+    final_ctx = HookContext(event=HookEvent.ON_FINAL_RESPONSE,
+                            messages=messages,
+                            model=current_model(model),
+                            config=config,
+                            ui=ui,
+                            usage=usage,
+                            content=content,
+                            data=_merge_data(hooks_data))
+    final = hooks.fire(HookEvent.ON_FINAL_RESPONSE, final_ctx)
+    if final.content is not None:
+        content = final.content
+
+    assistant_msg = {}
+    assistant_msg['role'] = 'assistant'
+    assistant_msg['content'] = content
+    if reasoning:
+        assistant_msg['_reasoning'] = reasoning
+    messages.append(assistant_msg)
+
+    run_ctx = HookContext(event=HookEvent.AFTER_RUN,
+                          messages=messages,
+                          model=current_model(model),
+                          config=config,
+                          ui=ui,
+                          usage=usage,
+                          content=content,
+                          data=_merge_data(hooks_data))
+    hooks.fire(HookEvent.AFTER_RUN, run_ctx)
+    return content
 
 
 def call_llm(messages,
@@ -393,9 +427,21 @@ def call_llm(messages,
     """The agentic loop. See the module docstring for the consumer contract.
 
     messages   - the live conversation; mutated in place as the loop runs.
+    model      - a model id, or a callable returning one. never copied: every
+                 consumer (the api call, each hook context, the run gate)
+                 resolves it at its own moment, so a switch made anywhere
+                 mid-run - a hook, a command, another thread - is seen by
+                 the very next read.
     api        - a cai.api.OpenAiApi (or anything with the same .chat).
-    tools      - JSON tool schemas sent to the model (None disables tools).
+    tools      - JSON tool schemas sent to the model (None disables tools), or
+                 a callable returning them - like `model`, resolved before
+                 every call and never copied, so a hook that changes the
+                 agent's tool selection is seen by the next call.
     tools_dispatch - callable(name, args_dict) -> result, runs one tool.
+    system_prompt - the system text, or a callable returning it - resolved
+                 before every call like `model` and `tools`, so a hook that
+                 changes the agent's base prompt or skills is seen by the
+                 next call.
     hooks      - a HooksRegistry, or None for no hooks.
     ui         - a UI for hooks to prompt the human, or None for NULL_UI.
     interrupt  - a threading.Event; when set the loop winds down at the next
@@ -414,10 +460,9 @@ def call_llm(messages,
     hooks = _as_registry(hooks)
     if ui is None:
         ui = NULL_UI
-    if not tools:
-        tools = None  # falsy -> the api omits the tools field entirely
 
     content = ""
+    usage = None
     turn = 0
     while True:
         turn += 1
@@ -433,12 +478,25 @@ def call_llm(messages,
                 messages.append({"role": "user", "content": text})
                 yield Event(type=EventType.USER, text=text)
 
+        # before_turn: the observer's chance ahead of every model call - route
+        # the model (agent.set_model), shrink the conversation - with the last
+        # turn's usage (None on the first).
+        before_ctx = HookContext(event=HookEvent.BEFORE_TURN,
+                                 messages=messages,
+                                 model=current_model(model),
+                                 config=config,
+                                 ui=ui,
+                                 usage=usage,
+                                 data=_merge_data(hooks_data))
+        hooks.fire(HookEvent.BEFORE_TURN, before_ctx)
+
         # the model call wants the system prompt at index 0, but the caller's
         # `messages` must stay system-free and be the live append target for
         # tool turns. prepend the system into a throwaway per-call list.
         call_messages = messages
-        if system_prompt:
-            call_messages = [{"role": "system", "content": system_prompt}]
+        prompt = current_system_prompt(system_prompt)
+        if prompt:
+            call_messages = [{"role": "system", "content": prompt}]
             call_messages.extend(messages)
 
         content, reasoning, tool_calls, usage = yield from _turn(api,
@@ -483,37 +541,8 @@ def call_llm(messages,
                         messages.append({"role": "user", "content": text})
                         yield Event(type=EventType.USER, text=text)
                     continue
-            # let on_final_response hooks rewrite it, append it to the transcript,
-            # fire after_run, and hand it back.
-            final_ctx = HookContext(event=HookEvent.ON_FINAL_RESPONSE,
-                                    messages=messages,
-                                    model=model,
-                                    config=config,
-                                    ui=ui,
-                                    usage=usage,
-                                    content=content,
-                                    data=_merge_data(hooks_data))
-            for response in hooks.fire(HookEvent.ON_FINAL_RESPONSE, final_ctx):
-                if isinstance(response, str):
-                    content = response
-
-            assistant_msg = {}
-            assistant_msg['role'] = 'assistant'
-            assistant_msg['content'] = content
-            if reasoning:
-                assistant_msg['_reasoning'] = reasoning
-            messages.append(assistant_msg)
-
-            run_ctx = HookContext(event=HookEvent.AFTER_RUN,
-                                  messages=messages,
-                                  model=model,
-                                  config=config,
-                                  ui=ui,
-                                  usage=usage,
-                                  content=content,
-                                  data=_merge_data(hooks_data))
-            hooks.fire(HookEvent.AFTER_RUN, run_ctx)
-            return content
+            return _finish(messages, model, hooks, config, ui, usage, hooks_data,
+                           content, reasoning)
 
         yield from _handle_tool_calls(calls,
                                       messages,
@@ -529,9 +558,16 @@ def call_llm(messages,
 
         turn_ctx = HookContext(event=HookEvent.AFTER_TURN,
                                messages=messages,
-                               model=model,
+                               model=current_model(model),
                                config=config,
                                ui=ui,
                                usage=usage,
                                data=_merge_data(hooks_data))
-        hooks.fire(HookEvent.AFTER_TURN, turn_ctx)
+        after_turn = hooks.fire(HookEvent.AFTER_TURN, turn_ctx)
+        if after_turn.stop:
+            # a hook ended the run: its content is the answer, no further model
+            # call - through the same final path a model's own answer takes.
+            final_text = after_turn.content
+            if final_text is None: final_text = ""
+            return _finish(messages, model, hooks, config, ui, usage, hooks_data,
+                           final_text, None)

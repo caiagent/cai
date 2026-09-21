@@ -243,7 +243,7 @@ class SkillsRegistry:
     def system_prompt(self):
         """the activated skills' prompt bodies, foundation-first, slots filled,
         joined - or None when no skill contributed a prompt. slots resolve fresh
-        on every read (the agent reads once per turn), so a filler's latest
+        on every read (the loop reads once per model call), so a filler's latest
         state reaches the model without any tool call."""
         parts = []
         for name, skill in self._skills.items():

@@ -204,6 +204,11 @@ class Screen:
         self._write_pending = False
         self._last_render_time = 0.0
 
+        # nesting depth of _begin_frame/_end_frame: the outermost frame hides
+        # the cursor before any row lands and flushes once at the end, so a
+        # repaint reaches the terminal as one write with no cursor wandering.
+        self._frame_depth = 0
+
         self._tty_file = open('/dev/tty', 'rb+', buffering=0)
         self._tty_fd = self._tty_file.fileno()
         self._cooked_attrs = termios.tcgetattr(self._tty_fd)
@@ -315,28 +320,49 @@ class Screen:
             # batch rendering: don't redraw more than ~60fps
             now = time.monotonic()
             if now - self._last_render_time >= _RENDER_INTERVAL:
-                sys.stdout.write(SYNC_START)
-                self._refresh_content()
-                self._refresh_status()
-                # while the user is actively at the prompt, re-render the
-                # input area so their cursor stays parked where they're
-                # typing instead of jumping into the content viewport every
-                # time the LLM streams another chunk. in NORMAL/VISUAL modes
-                # position_cursor parks the block cursor in the content
-                # area instead of the prompt.
-                if self._in_prompt:
-                    self._refresh_input()
-                    self._layout.position_cursor(self._state.mode,
-                                                 self._state.cursor_row,
-                                                 self._state.viewport_offset,
-                                                 self._state.cursor_col)
-                    self._place_live_cursor()
-                sys.stdout.write(SYNC_END)
-                sys.stdout.flush()
-                self._last_render_time = now
-                self._write_pending = False
+                self._stream_frame()
             else:
                 self._write_pending = True
+
+    def _begin_frame(self):
+        """open a paint: the outermost frame hides the cursor so it does not
+        wander across the rows as they land (region painters re-show it once
+        they have placed it)."""
+        self._render_lock.acquire()
+        if self._frame_depth == 0:
+            sys.stdout.write(SYNC_START + CUR_HIDE)
+        self._frame_depth += 1
+
+    def _end_frame(self):
+        """close a paint: the outermost frame flushes, once. the frame holds
+        the render lock from begin to end, so two threads never interleave
+        their rows on the terminal."""
+        self._frame_depth -= 1
+        if self._frame_depth == 0:
+            sys.stdout.write(SYNC_END)
+            sys.stdout.flush()
+        self._render_lock.release()
+
+    def _stream_frame(self):
+        """the streaming repaint: content and status, and - while the user
+        is at the prompt - the input area too, so their cursor stays parked
+        where they type instead of jumping into the viewport with every
+        chunk (in NORMAL/VISUAL position_cursor parks the block cursor in the
+        content area instead). the layout skips rows that did not change, so
+        a token costs one row."""
+        self._begin_frame()
+        self._refresh_content()
+        self._refresh_status()
+        if self._in_prompt:
+            self._refresh_input()
+            self._layout.position_cursor(self._state.mode,
+                                         self._state.cursor_row,
+                                         self._state.viewport_offset,
+                                         self._state.cursor_col)
+            self._place_live_cursor()
+        self._end_frame()
+        self._last_render_time = time.monotonic()
+        self._write_pending = False
 
     def _kind_gutter(self, kind):
         """the styled gutter prefix for a kind, or '' for unstyled writes."""
@@ -404,7 +430,6 @@ class Screen:
                 self._handle_resize()
             else:
                 self._refresh_status()
-            sys.stdout.flush()
 
     def write_status_hint(self, hint):
         """temporarily show a hint on the status bar."""
@@ -413,7 +438,6 @@ class Screen:
         with self._render_lock:
             if self._focus_stack[-1] == 'main':
                 self._refresh_status()
-                sys.stdout.flush()
         self._status_text = old
 
     def set_cmd_completions(self, completions):
@@ -560,7 +584,6 @@ class Screen:
         with self._render_lock:
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
-            sys.stdout.flush()
 
     def close(self):
         """exit alternate screen and restore the terminal."""
@@ -699,19 +722,7 @@ class Screen:
                 # flush any pending batched writes
                 if self._write_pending:
                     with self._render_lock:
-                        sys.stdout.write(SYNC_START)
-                        self._refresh_content()
-                        self._refresh_status()
-                        self._refresh_input()
-                        self._layout.position_cursor(self._state.mode,
-                                                     self._state.cursor_row,
-                                                     self._state.viewport_offset,
-                                                     self._state.cursor_col)
-                        self._place_live_cursor()
-                        sys.stdout.write(SYNC_END)
-                        sys.stdout.flush()
-                        self._write_pending = False
-                        self._last_render_time = time.monotonic()
+                        self._stream_frame()
 
                 if not rlist: continue
 
@@ -791,7 +802,6 @@ class Screen:
             self._state.viewport_offset = max(0, total - content_rows)
         sys.stdout.write(ALT_ENTER + MOUSE_ON + BRACKET_PASTE_ON + ERASE_SCREEN)
         self._refresh_all()
-        sys.stdout.flush()
         self._write_pending = False
         self._last_render_time = time.monotonic()
 
@@ -1087,7 +1097,8 @@ class Screen:
                                     positioned_cells=self._positioned_cells())
 
     def _refresh_status(self):
-        """re-render the status line."""
+        """re-render the status line (its own frame when called directly)."""
+        self._begin_frame()
         search_buf = None
         if self._state.mode == Mode.SEARCH:
             search_buf = self._state.search_buf
@@ -1107,10 +1118,11 @@ class Screen:
                                    new_content_below=self._new_content_below,
                                    command_buf=command_buf,
                                    cursor_row=self._state.cursor_row)
-        sys.stdout.flush()
+        self._end_frame()
 
     def _refresh_input(self):
-        """re-render the input/prompt area."""
+        """re-render the input/prompt area (its own frame when called directly)."""
+        self._begin_frame()
         prev_height = self._layout.input_height
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
         if self._layout.input_height != prev_height:
@@ -1134,7 +1146,7 @@ class Screen:
                                   self._CONT_PREFIX,
                                   self._cols,
                                   command_buf=self._state.command_buf)
-        sys.stdout.flush()
+        self._end_frame()
 
     def _build_search_spans(self):
         """group the flat match list into per-line (start, end) spans."""
@@ -1159,8 +1171,8 @@ class Screen:
         return (sr, er, line_mode, sc, ec)
 
     def _refresh_all(self):
-        """full screen redraw, presented as one synchronized frame."""
-        sys.stdout.write(SYNC_START)
+        """full screen redraw, presented as one frame."""
+        self._begin_frame()
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
         search_buf = None
         if self._state.mode == Mode.SEARCH:
@@ -1188,8 +1200,7 @@ class Screen:
                                 widget_lines=self._widget_lines(),
                                 positioned_cells=self._positioned_cells())
         self._place_live_cursor()
-        sys.stdout.write(SYNC_END)
-        sys.stdout.flush()
+        self._end_frame()
 
     def _on_resize(self, signum, frame):
         ts = shutil.get_terminal_size()
@@ -1222,4 +1233,3 @@ class Screen:
         if self._focus_stack[-1] != 'main': return
         sys.stdout.write(ERASE_SCREEN)
         self._refresh_all()
-        sys.stdout.flush()

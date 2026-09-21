@@ -8,7 +8,7 @@ from .ansi import (
     SGR_AZURE_ON_DGRAY, SGR_BOLD_AZURE, SGR_REVERSE_YELLOW,
     CUR_HIDE, CUR_SHOW, CURSOR_BLOCK,
     ERASE_LINE, ERASE_SCREEN,
-    cur_move, ansi_strip, wrap_ansi,
+    cur_move, ansi_strip, wrap_ansi, display_width,
 )
 from .state import Mode
 
@@ -71,6 +71,10 @@ class Layout:
         self._rows = max(3, rows)
         self._cols = max(1, cols)
         self._input_height = 1
+        # what each terminal row (1-based) showed after the last paint. a
+        # render only emits the rows whose payload differs, so a streamed
+        # token repaints one row, not the whole screen.
+        self._painted = {}
 
     @property
     def rows(self):
@@ -118,6 +122,31 @@ class Layout:
     def resize(self, rows, cols):
         self._rows = max(3, rows)
         self._cols = max(1, cols)
+        self.invalidate()
+
+    def invalidate(self):
+        """forget what the terminal shows - the next render paints every row.
+        called whenever something else drew on the screen (an overlay, an
+        erase, a resize)."""
+        self._painted = {}
+
+    def _paint_row(self, out, row, text, cols, cells=()):
+        """queue terminal row (1-based) showing text, followed by any overlay
+        cells (col, text) on it - unless the row already shows exactly that.
+        the text lands first and the rest of the row is erased after it, so
+        a cell is overwritten in place rather than blanked and refilled: the
+        visible flicker on terminals without synchronized output."""
+        parts = [cur_move(row, 1), text, SGR_RESET]
+        if display_width(text) < cols:
+            parts.append(ERASE_LINE)
+        for col, cell in cells:
+            parts.append(cur_move(row, col))
+            parts.append(cell)
+            parts.append(SGR_RESET)
+        payload = ''.join(parts)
+        if self._painted.get(row) == payload: return
+        self._painted[row] = payload
+        out.append(payload)
 
     def render_content(self,
                        lines,
@@ -162,48 +191,42 @@ class Layout:
 
         for vrow in range(content_rows):
             buf_line_idx = viewport_offset + vrow
-            out.append(cur_move(vrow + 1, 1))
-            out.append(ERASE_LINE)
+            line = ''
             if buf_line_idx < len(lines):
                 line = lines[buf_line_idx]
 
-                line_spans = None
-                if search_spans:
-                    line_spans = search_spans.get(buf_line_idx)
+            line_spans = None
+            if search_spans:
+                line_spans = search_spans.get(buf_line_idx)
 
-                # highlight substring search matches (stripping ANSI on
-                # matched lines - same trade-off as selection highlighting).
-                if line_spans:
-                    line = _apply_spans(ansi_strip(line), line_spans)
-                # highlight visual selection (no search spans on this line)
-                elif selection is not None and sel_sr <= buf_line_idx <= sel_er:
-                    plain = ansi_strip(line)
-                    if sel_line_mode:
-                        # line-mode: entire line highlighted
-                        line = SGR_REVERSE + plain + SGR_RESET
-                    elif sel_sr == sel_er:
-                        # single-line character selection
-                        sc = min(sel_sc, len(plain))
-                        ec = min(sel_ec + 1, len(plain))
-                        line = (plain[:sc] + SGR_REVERSE +
-                                plain[sc:ec] + SGR_RESET +
-                                plain[ec:])
-                    elif buf_line_idx == sel_sr:
-                        sc = min(sel_sc, len(plain))
-                        line = plain[:sc] + SGR_REVERSE + plain[sc:] + SGR_RESET
-                    elif buf_line_idx == sel_er:
-                        ec = min(sel_ec + 1, len(plain))
-                        line = SGR_REVERSE + plain[:ec] + SGR_RESET + plain[ec:]
-                    else:
-                        # middle lines: fully highlighted
-                        line = SGR_REVERSE + plain + SGR_RESET
+            # highlight substring search matches (stripping ANSI on
+            # matched lines - same trade-off as selection highlighting).
+            if line_spans:
+                line = _apply_spans(ansi_strip(line), line_spans)
+            # highlight visual selection (no search spans on this line)
+            elif selection is not None and sel_sr <= buf_line_idx <= sel_er:
+                plain = ansi_strip(line)
+                if sel_line_mode:
+                    # line-mode: entire line highlighted
+                    line = SGR_REVERSE + plain + SGR_RESET
+                elif sel_sr == sel_er:
+                    # single-line character selection
+                    sc = min(sel_sc, len(plain))
+                    ec = min(sel_ec + 1, len(plain))
+                    line = (plain[:sc] + SGR_REVERSE +
+                            plain[sc:ec] + SGR_RESET +
+                            plain[ec:])
+                elif buf_line_idx == sel_sr:
+                    sc = min(sel_sc, len(plain))
+                    line = plain[:sc] + SGR_REVERSE + plain[sc:] + SGR_RESET
+                elif buf_line_idx == sel_er:
+                    ec = min(sel_ec + 1, len(plain))
+                    line = SGR_REVERSE + plain[:ec] + SGR_RESET + plain[ec:]
+                else:
+                    # middle lines: fully highlighted
+                    line = SGR_REVERSE + plain + SGR_RESET
 
-                out.append(line)
-            out.append(SGR_RESET)
-            for wcol, wtext in widget_cells.get(vrow, ()):
-                out.append(cur_move(vrow + 1, wcol))
-                out.append(wtext)
-                out.append(SGR_RESET)
+            self._paint_row(out, vrow + 1, line, cols, widget_cells.get(vrow, ()))
         sys.stdout.write(''.join(out))
 
     def render_status(self,
@@ -220,19 +243,18 @@ class Layout:
                       command_buf=None,
                       cursor_row=0):
         """render the status bar at the bottom row."""
-        out = [cur_move(self.status_row, 1), ERASE_LINE]
+        out = []
 
         if mode == Mode.COMMAND:
             # command mode: show ':' prefix + command text on status line
             cmd_text = ''
             if command_buf:
                 cmd_text = ''.join(command_buf)
-            out.append(f':{cmd_text}')
-            out.append(SGR_RESET)
-            sys.stdout.write(''.join(out))
+            self._paint_row(out, self.status_row, f':{cmd_text}', cols)
             # position cursor right after the typed text
-            sys.stdout.write(cur_move(self.status_row, 2 + len(cmd_text)))
-            sys.stdout.write(CUR_SHOW)
+            out.append(cur_move(self.status_row, 2 + len(cmd_text)))
+            out.append(CUR_SHOW)
+            sys.stdout.write(''.join(out))
             return
 
         if mode == Mode.SEARCH:
@@ -243,15 +265,13 @@ class Layout:
             pattern = ''
             if search_buf:
                 pattern = ''.join(search_buf)
-            out.append(f'{prefix}{pattern}')
-            out.append(SGR_RESET)
-            sys.stdout.write(''.join(out))
+            self._paint_row(out, self.status_row, f'{prefix}{pattern}', cols)
             # position cursor right after the typed text
-            sys.stdout.write(cur_move(self.status_row, 1 + len(prefix) + len(pattern)))
-            sys.stdout.write(CUR_SHOW)
+            out.append(cur_move(self.status_row, 1 + len(prefix) + len(pattern)))
+            out.append(CUR_SHOW)
+            sys.stdout.write(''.join(out))
             return
 
-        out.append(SGR_AZURE_ON_DGRAY)
         label = _MODE_LABELS.get(mode, '')
         left = f' {label}'
         if status_text:
@@ -283,8 +303,7 @@ class Layout:
             pad = 0
         status_line = left + ' ' * pad + right
 
-        out.append(status_line[:cols])
-        out.append(SGR_RESET)
+        self._paint_row(out, self.status_row, SGR_AZURE_ON_DGRAY + status_line[:cols], cols)
         sys.stdout.write(''.join(out))
 
     def render_input(self,
@@ -298,11 +317,13 @@ class Layout:
         """render the input/command area above the status line."""
         cols = max(1, cols)
         input_start = self.input_start_row
+        out = []
 
         if mode == Mode.COMMAND:
             # command mode renders on the status line (bottom row), like
             # vim. clear the input area first.
-            sys.stdout.write(cur_move(input_start, 1) + ERASE_LINE)
+            self._paint_row(out, input_start, '', cols)
+            sys.stdout.write(''.join(out))
             return
 
         # normal / insert / visual / search modes
@@ -316,14 +337,10 @@ class Layout:
                 prefix = cont_prefix
             line_vrows.append(_count_visual_rows(line, len(prefix), cols))
 
-        # erase the full input area first - otherwise we'd wipe out the
-        # continuation rows that the terminal just wrapped our text onto.
-        for vr in range(self.status_row - input_start):
-            sys.stdout.write(cur_move(input_start + vr, 1) + ERASE_LINE)
-
-        # render each logical line, manually wrapped so each visual row is
-        # placed explicitly rather than relying on terminal auto-wrap.
-        vrow_offset = 0
+        # each logical line manually wrapped so each visual row is placed
+        # explicitly rather than relying on terminal auto-wrap; every row of
+        # the input area is painted (a blank one clears a stale row).
+        visual = []
         for i, line in enumerate(lines):
             prefix = prompt_prefix
             if i > 0:
@@ -331,14 +348,12 @@ class Layout:
             wrapped = wrap_ansi(f'{prefix}{line}', cols)
             if not wrapped:
                 wrapped = ['']
-            for wline in wrapped:
-                abs_row = input_start + vrow_offset
-                if abs_row >= self.status_row:
-                    break
-                sys.stdout.write(cur_move(abs_row, 1) + wline)
-                vrow_offset += 1
-            if input_start + vrow_offset >= self.status_row:
-                break
+            visual.extend(wrapped)
+        for vr in range(self.status_row - input_start):
+            text = ''
+            if vr < len(visual):
+                text = visual[vr]
+            self._paint_row(out, input_start + vr, text, cols)
 
         if mode == Mode.INSERT:
             # position cursor in prompt area
@@ -349,8 +364,9 @@ class Layout:
                                                          cols,
                                                          line_vrows)
             abs_cursor_row = input_start + cursor_vrow
-            sys.stdout.write(cur_move(abs_cursor_row, cursor_col + 1))
-            sys.stdout.write(CUR_SHOW)
+            out.append(cur_move(abs_cursor_row, cursor_col + 1))
+            out.append(CUR_SHOW)
+        sys.stdout.write(''.join(out))
 
     def _widget_cells(self, lines, cols):
         """(vrow, col, text) placements for hover-widget lines: line i
@@ -425,7 +441,8 @@ class Layout:
                    cursor_col=0,
                    widget_lines=None,
                    positioned_cells=None):
-        """full screen redraw (used on resize and initial draw)."""
+        """full redraw of every region; rows unchanged since the last paint
+        are skipped (see _paint_row), so this is cheap to call per frame."""
         self.render_content(buffer_lines,
                             self.content_rows,
                             self._cols,
@@ -477,4 +494,3 @@ class Layout:
                               cont_prefix,
                               self._cols)
         self.position_cursor(mode, cursor_row, viewport_offset, cursor_col)
-        sys.stdout.flush()

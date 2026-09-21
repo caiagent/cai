@@ -2,6 +2,8 @@
 
 Layer 0: cai.api    - the OpenAI-compatible HTTP client (the LLM call).
 Layer 1: cai.llm    - the core agentic loop (call_llm).
+         cai.decision - the System One decision call (decide): typed
+                        answers about a state, no loop.
          cai.events - the Event value the loop yields, and EventType.
          cai.hooks  - the hook registry the loop fires.
 Layer 2: cai.agent  - Agent (persistent conversation) + Run (one-shot execution).
@@ -25,7 +27,7 @@ logging.basicConfig(
 from cai.paths import safe_path, scratch_dir
 from cai.ui import current_ui
 from cai.events import Event, EventType
-from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall, hook
+from cai.hooks import HookContext, HookEvent, HookResult, HooksRegistry, ToolCall, hook, current_agent
 from cai.commands import Command, CommandContext, command
 from cai.skills import SlotContext, slot
 from cai.llm import LLMError, MaxStepsReached, call_llm
@@ -36,7 +38,8 @@ from cai.llm import LLMError, MaxStepsReached, call_llm
 # definitions (go-to-def) without paying the import.
 if TYPE_CHECKING:
     from cai.agent import Agent, Run, RunInFlight
-    from cai.api import ApiError
+    from cai.api import ApiError, SystemOneApi
+    from cai.decision import decide
     from cai.environment import Environment, Settings
     from cai.tools import ToolsRegistry, tool, wrap, mcp_server
     # cai.settings is served by __getattr__ at runtime; this declaration is
@@ -51,6 +54,7 @@ __all__ = [
     "EventType",
     "HookContext",
     "HookEvent",
+    "HookResult",
     "HooksRegistry",
     "ToolCall",
     "hook",
@@ -62,8 +66,11 @@ __all__ = [
     "ToolsRegistry",
     "tool",
     "wrap",
+    "current_agent",
     "mcp_server",
     "ApiError",
+    "SystemOneApi",
+    "decide",
     "LLMError",
     "MaxStepsReached",
     "call_llm",
@@ -97,6 +104,13 @@ def __getattr__(name):
     if name == "ApiError":
         from cai.api import ApiError
         return ApiError
+    if name == "SystemOneApi":
+        from cai.api import SystemOneApi
+        return SystemOneApi
+    # decision pulls api (requests) and config; lazy for the same reason.
+    if name == "decide":
+        from cai.decision import decide
+        return decide
     # tools pulls the environment, so keep it lazy too - cai.tool resolves
     # here the first time an extension's tools/*.py decorates a function.
     if name == "tool":

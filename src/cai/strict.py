@@ -91,6 +91,13 @@ def resolve_format(strict_format):
 
 
 def _augment(system_prompt, guidance):
+    """the system prompt with the format guidance appended. system_prompt may
+    be a getter (an Agent's live prompt): then the result is a getter too, so
+    every attempt's every call reads the prompt of that moment."""
+    if callable(system_prompt):
+        def augmented():
+            return _augment(system_prompt(), guidance)
+        return augmented
     if not system_prompt:
         return guidance
     return system_prompt + "\n\n" + guidance

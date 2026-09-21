@@ -211,6 +211,8 @@ def _textobj_inner_delimited(plain, col, char):
     if open_ch is None:
         return None
     close_ch = _BRACKET_PAIRS.get(open_ch, char)
+    # an empty line, or a cursor past the last character, has no bracket at col
+    if col >= n: return None
 
     # Search backward for opening bracket
     depth = 0

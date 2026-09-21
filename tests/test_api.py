@@ -11,7 +11,7 @@ import pytest
 import requests
 
 import cai.api as api
-from cai.api import ApiError, OpenAiApi, _wire_messages
+from cai.api import ApiError, OpenAiApi, SystemOneApi, _wire_messages
 
 
 # --------------------------------------------------------------------------
@@ -722,3 +722,117 @@ def test_interrupt_during_retry_backoff_stops_retrying(monkeypatch):
     with pytest.raises(ApiError):
         client()._post_with_retry(url, {}, {}, stream=False, interrupt=interrupt)
     assert len(rec.calls) == 1            # gave up instead of retrying
+
+
+# --------------------------------------------------------------------------
+# system one (decision model)
+# --------------------------------------------------------------------------
+
+def system_one_body(answers=None, usage=None):
+    body = {}
+    body['model'] = "jev-latest"
+    if answers is None:
+        answers = {"risky": {"type": "noul", "noul": 0.92}}
+    body['answers'] = answers
+    if usage is not None:
+        body['usage'] = usage
+    return body
+
+
+def decider():
+    return SystemOneApi("https://example.test/v1", "sk-test")
+
+
+def questions():
+    q = {}
+    q['risky'] = {"type": "noul", "instructions": "Would this damage user data?"}
+    return q
+
+
+def test_system_one_url_built_from_base(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(body=system_one_body()))
+    decider().system_one("rm -rf /", questions(), "jev-latest")
+    assert rec.last['url'] == "https://example.test/v1/systemone"
+
+
+def test_system_one_openrouter_base_uses_decisions_path(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(body=system_one_body()))
+    SystemOneApi("https://openrouter.ai/api/v1", "sk-test").system_one("s", questions(), "~typesafe/jev-latest")
+    assert rec.last['url'] == "https://openrouter.ai/api/alpha/decisions"
+    assert rec.data['model'] == "~typesafe/jev-latest"
+
+
+def test_system_one_openrouter_detection_is_by_host_only(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(body=system_one_body()))
+    SystemOneApi("https://proxy.test/openrouter.ai/v1", "sk-test").system_one("s", questions(), "m")
+    assert rec.last['url'] == "https://proxy.test/openrouter.ai/v1/systemone"
+
+
+def test_system_one_payload_shape(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(body=system_one_body()))
+    state = {"tool": "fs__write_file", "args": {"path": "/etc/hosts"}}
+    decider().system_one(state, questions(), "jev-latest")
+    assert rec.data == {"model": "jev-latest", "state": state, "questions": questions()}
+    assert 'messages' not in rec.data
+    assert 'stream' not in rec.data
+
+
+def test_system_one_headers_and_verify_and_timeout(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(body=system_one_body()))
+    SystemOneApi("https://example.test/v1", "sk-test", ssl_verify=False,
+                 timeout=[3, 4]).system_one("s", questions(), "m")
+    kwargs = rec.last['kwargs']
+    assert kwargs['headers']['Authorization'] == "Bearer sk-test"
+    assert kwargs['headers']['Content-Type'] == "application/json"
+    assert kwargs['verify'] is False
+    assert kwargs['timeout'] == (3, 4)
+    assert 'stream' not in kwargs
+
+
+def test_system_one_returns_answers_and_usage(monkeypatch):
+    answers = {}
+    answers['risky'] = {"type": "noul", "noul": 0.92}
+    answers['team'] = {"type": "choice",
+                       "choice": "technical",
+                       "probabilities": {"billing": 0.08, "technical": 0.85, "sales": 0.07},
+                       "confidence": 0.82}
+    usage = {"input_tokens": 312, "output_tokens": 48}
+    install(monkeypatch, FakeResponse(body=system_one_body(answers, usage)))
+    out = decider().system_one("s", questions(), "m")
+    assert out == (answers, usage)
+
+
+def test_system_one_missing_usage_is_empty_dict(monkeypatch):
+    install(monkeypatch, FakeResponse(body=system_one_body()))
+    answers, usage = decider().system_one("s", questions(), "m")
+    assert usage == {}
+
+
+def test_system_one_no_answers_raises(monkeypatch):
+    install(monkeypatch, FakeResponse(body={"model": "jev-latest"}))
+    with pytest.raises(ApiError) as err:
+        decider().system_one("s", questions(), "m")
+    assert "no answers" in str(err.value)
+
+
+def test_system_one_invalid_json_raises_without_retry(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(raise_json=True))
+    with pytest.raises(ApiError):
+        decider().system_one("s", questions(), "m")
+    assert len(rec.calls) == 1
+
+
+def test_system_one_retries_transient_then_succeeds(monkeypatch):
+    script = [FakeResponse(status_code=429), FakeResponse(body=system_one_body())]
+    rec = install(monkeypatch, script=script)
+    answers, usage = decider().system_one("s", questions(), "m")
+    assert answers == {"risky": {"type": "noul", "noul": 0.92}}
+    assert len(rec.calls) == 2
+
+
+def test_system_one_validation_error_not_retried(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(status_code=422))
+    with pytest.raises(ApiError) as err:
+        decider().system_one("s", questions(), "m")
+    assert err.value.status == 422
+    assert len(rec.calls) == 1

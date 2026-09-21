@@ -12,7 +12,7 @@ import pytest
 import cai
 from cai import config, hooks, pytool
 from cai.agent import Agent
-from cai.hooks import HooksRegistry, RunGate
+from cai.hooks import HookResult, HooksRegistry, RunGate
 
 
 def _fast_venv(monkeypatch):
@@ -714,7 +714,7 @@ def test_inner_call_is_gated_by_before_tool_call(monkeypatch):
     agent = _agent_with_echo()
 
     def veto(ctx):
-        return False
+        return HookResult.veto()
     registry = HooksRegistry()
     registry.register("before_tool_call", veto)
     gate = RunGate(hooks=registry,

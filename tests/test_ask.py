@@ -127,6 +127,7 @@ class FakeScreen(Screen):
         self._focus_stack = ['main']
         self._write_pending = False
         self._last_render_time = 0.0
+        self._frame_depth = 0
         self._in_prompt = False
         self.frames = 0
 

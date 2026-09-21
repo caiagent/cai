@@ -1,5 +1,6 @@
 """Tests for the session scratch directory: the Agent owns (or inherits) it,
-the ToolsRegistry hands it to every local MCP spawn as CAI_SCRATCH, and the
+the ToolsRegistry (which holds the agent) hands it to every local MCP spawn as
+CAI_SCRATCH along with the agent's name as CAI_AGENT, and the
 builtin fs server admits it alongside the cwd jail. The fs server is really
 spawned - no network, everything under tmp_path."""
 import os
@@ -15,6 +16,19 @@ from cai.tools import ToolsRegistry
 
 def _fs_path():
     return os.path.join(builtin_mcp_dir(), "fs.py")
+
+
+class _StubAgent:
+    """the two attributes ToolsRegistry reads off its agent."""
+
+    def __init__(self, scratch=None, name=None):
+        self._scratch = scratch
+        self.name = name
+
+    def scratch(self):
+        if callable(self._scratch):
+            return self._scratch()
+        return self._scratch
 
 
 def test_safe_path_confines_to_cwd(tmp_path, monkeypatch):
@@ -50,7 +64,7 @@ def test_scratch_injected_into_declared_server(tmp_path):
     (scratch / "artifact.txt").write_text("intermediate bytes")
     cai.mcp_server("myfs", command=[sys.executable, _fs_path()])
 
-    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry = ToolsRegistry(agent=_StubAgent(str(scratch)))
     registry.select("myfs__read_file")
     try:
         out = registry.dispatch("myfs__read_file",
@@ -65,7 +79,7 @@ def test_scratch_injected_into_file_discovered_server(tmp_path):
     scratch.mkdir()
     (scratch / "artifact.txt").write_text("found via builtins")
 
-    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry = ToolsRegistry(agent=_StubAgent(str(scratch)))
     registry.select("fs__read_file")
     try:
         out = registry.dispatch("fs__read_file",
@@ -86,7 +100,7 @@ def test_declared_env_wins_over_injected_scratch(tmp_path):
                    command=[sys.executable, _fs_path()],
                    env={"CAI_SCRATCH": str(declared)})
 
-    registry = ToolsRegistry(scratch=lambda: str(injected))
+    registry = ToolsRegistry(agent=_StubAgent(str(injected)))
     registry.select("myfs__read_file")
     try:
         out = registry.dispatch("myfs__read_file", {"file_path": str(declared / "a.txt")})
@@ -95,6 +109,44 @@ def test_declared_env_wins_over_injected_scratch(tmp_path):
         assert "outside working directory" in out
     finally:
         registry.close()
+
+
+_ECHO_SERVER = """
+import os
+from mcp.server.fastmcp import FastMCP
+mcp = FastMCP(name="echo")
+
+@mcp.tool()
+def agent() -> str:
+    return os.environ.get("CAI_AGENT", "<unset>")
+
+mcp.run()
+"""
+
+
+def test_agent_name_injected_into_spawned_server(tmp_path):
+    server = tmp_path / "echo.py"
+    server.write_text(_ECHO_SERVER)
+    cai.mcp_server("echo", command=[sys.executable, str(server)])
+
+    registry = ToolsRegistry(agent=_StubAgent(name="swift-fox"))
+    registry.select("echo__agent")
+    try:
+        assert registry.dispatch("echo__agent", {}) == "swift-fox"
+    finally:
+        registry.close()
+
+
+def test_agent_wires_its_name_into_spawned_server(tmp_path):
+    server = tmp_path / "echo.py"
+    server.write_text(_ECHO_SERVER)
+    cai.mcp_server("echo", command=[sys.executable, str(server)])
+
+    agent = Agent(model="m", api=object(), name="quiet-owl", tools=["echo__agent"])
+    try:
+        assert agent.tools_registry.dispatch("echo__agent", {}) == "quiet-owl"
+    finally:
+        agent.close()
 
 
 def test_no_scratch_provider_means_no_injection(tmp_path):
@@ -116,7 +168,7 @@ def test_scratch_does_not_unlock_other_paths(tmp_path):
     elsewhere = tmp_path / "elsewhere.txt"
     elsewhere.write_text("still jailed")
 
-    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry = ToolsRegistry(agent=_StubAgent(str(scratch)))
     registry.select("fs__read_file")
     try:
         out = registry.dispatch("fs__read_file", {"file_path": str(elsewhere)})
@@ -133,7 +185,7 @@ def test_scratch_dir_inside_a_function_tool_reads_the_provider(tmp_path, monkeyp
         """where."""
         return cai.scratch_dir()
 
-    registry = ToolsRegistry(scratch=lambda: str(tmp_path / "s"))
+    registry = ToolsRegistry(agent=_StubAgent(str(tmp_path / "s")))
     registry.select("where")
     assert registry.dispatch("where", {}) == str(tmp_path / "s")
 
@@ -150,10 +202,52 @@ def test_scratch_provider_only_called_when_a_tool_asks(tmp_path):
         """indifferent."""
         return "never asked"
 
-    registry = ToolsRegistry(scratch=provider)
+    registry = ToolsRegistry(agent=_StubAgent(provider))
     registry.select("indifferent")
     assert registry.dispatch("indifferent", {}) == "never asked"
     assert calls == []
+
+
+def test_current_agent_inside_a_function_tool_is_the_dispatching_agent():
+    @cai.tool
+    def whoami() -> str:
+        """whoami."""
+        return cai.current_agent().name
+
+    a = Agent(model="m", api=object(), name="alpha", tools=["whoami"])
+    b = Agent(model="m", api=object(), name="beta", tools=["whoami"])
+    try:
+        assert a.tools_registry.dispatch("whoami", {}) == "alpha"
+        assert b.tools_registry.dispatch("whoami", {}) == "beta"
+    finally:
+        a.close()
+        b.close()
+    assert cai.current_agent() is None
+
+
+def test_current_agent_is_reset_after_a_tool_raises():
+    @cai.tool
+    def boom() -> str:
+        """boom."""
+        raise RuntimeError("no")
+
+    agent = Agent(model="m", api=object(), name="alpha", tools=["boom"])
+    try:
+        assert "Error" in agent.tools_registry.dispatch("boom", {})
+    finally:
+        agent.close()
+    assert cai.current_agent() is None
+
+
+def test_current_agent_is_none_on_a_bare_registry():
+    @cai.tool
+    def who() -> str:
+        """who."""
+        return repr(cai.current_agent())
+
+    registry = ToolsRegistry()
+    registry.select("who")
+    assert registry.dispatch("who", {}) == "None"
 
 
 def test_scratch_dir_outside_dispatch_falls_back_to_env(monkeypatch):
@@ -176,7 +270,7 @@ def test_safe_path_admits_scratch_inside_a_function_tool(tmp_path, monkeypatch):
         """jail."""
         return cai.safe_path(p)
 
-    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry = ToolsRegistry(agent=_StubAgent(str(scratch)))
     registry.select("jail")
     out = registry.dispatch("jail", {"p": str(scratch / "a.bin")})
     assert out == str(scratch / "a.bin")
@@ -231,7 +325,7 @@ def test_scratch_token_materializes_the_dir_inside_a_tool(tmp_path, monkeypatch)
         """jail."""
         return cai.safe_path(p)
 
-    registry = ToolsRegistry(scratch=provider)
+    registry = ToolsRegistry(agent=_StubAgent(provider))
     registry.select("jail")
     out = registry.dispatch("jail", {"p": "$CAI_SCRATCH/a.bin"})
     assert out == os.path.join(created["path"], "a.bin")
@@ -243,7 +337,7 @@ def test_agent_creates_scratch_lazily_and_deletes_on_close():
     path = agent.scratch()
     assert os.path.isdir(path)
     assert agent.scratch() == path
-    assert agent.tools_registry.scratch() == path
+    assert agent.tools_registry.agent is agent
     agent.close()
     assert not os.path.exists(path)
 

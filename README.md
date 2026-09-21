@@ -157,6 +157,10 @@ conversation plus the settings needed to resume it.
 ## Skills, tools, sub-agents
 
 - **Function tools** are plain Python callables registered with `@cai.tool`.
+  One that needs the agent it runs for (its name, messages, scratch dir)
+  reads `cai.current_agent()` inside the call, the way `cai.current_ui()`
+  and `cai.scratch_dir()` work; an MCP server, being another process, gets
+  the agent's name as `CAI_AGENT` instead.
 - **MCP tools** come from MCP servers, named `<server>__<tool>` so two
   servers can each expose a `search` without colliding. `fs` ships built in.
   A server is either a `mcps/*.py` FastMCP stdio script, or declared with
@@ -229,8 +233,20 @@ cai extend --list
 cai extend --remove my-bundle
 ```
 
-See `examples/extensions/`:
+See `examples/extensions/` (its `README.md` maps every hook event and agent
+mutation to an example):
 
+- `veto` — `before_tool_call` gates with `HookResult.veto`: a deny list, and a
+  `ctx.ui.confirm` on protected paths.
+- `judge` — the same gate decided by `cai.decide` (System One), fail closed.
+- `stuck` — `after_turn` hooks that end the run with `HookResult.finish` on a
+  repeated call or a turn budget.
+- `route` — a `before_turn` hook picking the model per call through
+  `cai.current_agent().set_model`, plus `:route` as the command-side twin.
+- `footer` — `on_final_response` rewriting the answer with `HookResult.answer`.
+- `nudge` — an `after_turn` observer appending a reminder to the live
+  conversation.
+- `focus` — a `before_turn` hook narrowing the tool selection.
 - `compact` — context compaction as a `:compact` command plus an `after_turn`
   auto-compact hook, in one `init.py`.
 - `clone` — `:clone`, a session checkpoint: save the session, then swap the
@@ -259,8 +275,16 @@ agent.save("session.flow")
 ```
 
 Tools are explicit: `tools=` takes Python callables or MCP tool-name strings;
-`skills=` takes skill names; `hooks=` takes `(event, fn)` pairs. Only what you
-pass is sent to the model. An `Agent` is constructed against an `Environment`
+`skills=` takes skill names; `hooks=` takes `(event, fn)` pairs. A hook returns
+nothing to observe, or a `cai.HookResult` to act: `HookResult.veto(reason)` on
+`before_tool_call` skips the tool (the model reads the reason),
+`HookResult.answer(text)` on `on_final_response` replaces the answer, and
+`HookResult.finish(text)` on `after_turn` ends the run with that answer. The
+other events observe; they act by mutating the agent, reached the way a tool
+reaches it, `cai.current_agent()` — a `before_turn` hook (fired ahead of every
+model call) that calls `cai.current_agent().set_model(...)` picks the model
+for that call. Only what you pass is
+sent to the model. An `Agent` is constructed against an `Environment`
 (`env=`), so two agents in one process can see two different installs — and a
 test builds a private empty one instead of resetting globals.
 
@@ -272,11 +296,26 @@ def word_count(text: str) -> int:
 
 @cai.hook("before_tool_call")
 def veto(ctx):
-    if ctx.tool_call.name == "fs__write_file": return False
+    if ctx.tool_call.name == "fs__write_file":
+        return cai.HookResult.veto("writes are off in this session")
 
 @cai.command
 def stats(ctx):
     ctx.write(f"{len(ctx.client.get_messages())} messages")
+```
+
+Typed decisions go through `cai.decide` — the System One call (model from the
+config's `system_one_model`, endpoint and key from the same config the agent
+uses; pass `model=`/`api=` to bypass it). Questions and answers are the wire
+shapes: `noul` (yes/no probability), `choice`, `score`.
+
+```python
+answers, usage = cai.decide(
+    "rm -rf ~/projects",
+    {"risky": {"type": "noul",
+               "instructions": "Would this shell command destroy user data?"}})
+if answers["risky"]["noul"] > 0.8:
+    ...
 ```
 
 ## Development

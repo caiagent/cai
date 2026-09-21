@@ -46,6 +46,7 @@ import urllib3
 
 from cai import paths
 from cai.environment import Environment
+from cai.hooks import current_agent, reset_agent, set_agent
 
 
 log = logging.getLogger("cai")
@@ -271,7 +272,7 @@ def _function_tool_name(fn):
 def server_from_spec(name, spec, extra_env=None):
     """build a live MCP server connection from a declared spec - a
     RemoteMCPServer for a url spec, a LocalMCPServer for a command one.
-    extra_env (the registry's CAI_SCRATCH injection) is merged under a command
+    extra_env (the registry's CAI_SCRATCH/CAI_AGENT injection) is merged under a command
     spec's own env - a declared variable wins; a url server has no process to
     inject into, so it is ignored there."""
     if "url" in spec:
@@ -402,13 +403,22 @@ class ToolsRegistry:
     under one of the env's mcp dirs - is spawned on first use, when its schema
     is read for the model or when the tool is called, not before."""
 
-    def __init__(self, env=None, scratch=None):
+    def __init__(self, env=None, agent=None):
         self.env = env or Environment.default()
-        # scratch: a zero-arg callable returning the session scratch directory
-        # (Agent wires its own; see Agent.scratch). every local MCP server this
-        # registry spawns gets it as CAI_SCRATCH, so tools share one place to
-        # exchange binary/bulky intermediates as files. None: no injection.
-        self.scratch = scratch
+        # agent: the Agent this registry serves, or None for a bare registry
+        # (tests, tooling). duck-typed - only two attributes are read, and
+        # both lazily, at spawn/dispatch rather than here, so a scratch dir is
+        # still only created when a tool asks and a name change on load/clone
+        # is seen:
+        #   agent.scratch() - the session scratch directory, handed to every
+        #     local MCP spawn as CAI_SCRATCH and to in-process tools through
+        #     cai.scratch_dir(), so tools share one place to exchange
+        #     binary/bulky intermediates as files.
+        #   agent.name - the name its socket is registered under
+        #     (AgentsRegistry.sock_path), handed to every local MCP spawn as
+        #     CAI_AGENT so a server can steer or ask the agent that spawned it.
+        # None: no injection, no scratch.
+        self.agent = agent
         self._functions = {}     # name -> callable
         self._dispatch = {}      # exposed_name -> tagged entry
         self._schemas = {}       # exposed_name -> schema (eager, or resolved lazily)
@@ -638,7 +648,7 @@ class ToolsRegistry:
         server = self._mcp_servers.get(mcp_name)
         if server is not None:
             return server
-        extra_env = self._scratch_env()
+        extra_env = self._spawn_env()
         spec = self.env.server_spec(mcp_name)
         if spec is not None:
             server = server_from_spec(mcp_name, spec, extra_env=extra_env)
@@ -651,15 +661,22 @@ class ToolsRegistry:
         self._mcp_servers[mcp_name] = server
         return server
 
-    def _scratch_env(self):
-        """the env injected into every local MCP spawn: the scratch directory
-        as CAI_SCRATCH when a provider is wired, else None (no injection)."""
-        if self.scratch is None:
+    def _spawn_env(self):
+        """the env injected into every local MCP spawn: the agent's scratch
+        directory as CAI_SCRATCH and its name as CAI_AGENT, each only when
+        set; None for a bare registry or when neither is."""
+        if self.agent is None:
             return None
-        path = self.scratch()
-        if not path:
+        env = {}
+        path = self.agent.scratch()
+        if path:
+            env["CAI_SCRATCH"] = path
+        name = self.agent.name
+        if name:
+            env["CAI_AGENT"] = name
+        if not env:
             return None
-        return {"CAI_SCRATCH": path}
+        return env
 
     def _call_function(self, name, arguments):
         fn = self._functions[name]
@@ -669,12 +686,15 @@ class ToolsRegistry:
             def call(**kwargs):
                 return self.dispatch(target, kwargs)
             args.append(call)
-        # bracket the call with this registry's scratch provider, so in-process
-        # tool code reaches it through cai.scratch_dir() the same way a spawned
-        # server reaches CAI_SCRATCH.
-        token = None
-        if self.scratch is not None:
-            token = paths._scratch_provider.set(self.scratch)
+        # bracket the call with the agent and its scratch provider, so
+        # in-process tool code reaches them through cai.current_agent() /
+        # cai.scratch_dir() the same way a spawned server reaches
+        # CAI_AGENT / CAI_SCRATCH.
+        agent_token = None
+        scratch_token = None
+        if self.agent is not None:
+            agent_token = set_agent(self.agent)
+            scratch_token = paths._scratch_provider.set(self.agent.scratch)
         try:
             if arguments:
                 result = fn(*args, **arguments)
@@ -684,8 +704,10 @@ class ToolsRegistry:
             log.exception("tool %s raised", name)
             return f"Error: tool '{name}' raised: {e}"
         finally:
-            if token is not None:
-                paths._scratch_provider.reset(token)
+            if scratch_token is not None:
+                paths._scratch_provider.reset(scratch_token)
+            if agent_token is not None:
+                reset_agent(agent_token)
         if result is None:
             return ""
         return str(result)
