@@ -30,17 +30,8 @@ _RESET = "\033[0m"
 
 
 def live_names():
-    """the served agents whose socket accepts a connection - the registry's
-    names minus stale files left by crashed agents."""
-    names = []
-    for name in AgentsRegistry.list_names():
-        try:
-            probe = AgentsRegistry.connect(name)
-        except OSError:
-            continue
-        probe.close()
-        names.append(name)
-    return names
+    """the served agents whose socket accepts a connection."""
+    return AgentsRegistry.list_names()
 
 
 def _stored_call_args(function):

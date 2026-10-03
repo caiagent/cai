@@ -35,16 +35,23 @@ class AgentsRegistry:
 
     @staticmethod
     def list_names():
-        """names of agents with a socket file present (live or stale)."""
+        """names of the live agents. every socket file is probed, so listing
+        doubles as a sweep: stale sockets (crash leftovers refusing
+        connections) are reaped by connect() and left out."""
         try:
             entries = os.listdir(AgentsRegistry.dir())
         except OSError:
             return []
         names = []
         for entry in entries:
-            if not entry.endswith(".sock"):
+            if not entry.endswith(".sock"): continue
+            name = entry[:-len(".sock")]
+            try:
+                probe = AgentsRegistry.connect(name)
+            except OSError:
                 continue
-            names.append(entry[:-len(".sock")])
+            probe.close()
+            names.append(name)
         return names
 
     @staticmethod

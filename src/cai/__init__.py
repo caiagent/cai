@@ -15,14 +15,16 @@ Entry:   cai.config      - bootstrap settings (API key, OpenRouter endpoint).
 import logging
 from typing import TYPE_CHECKING
 
-# every module logs through getLogger("cai"); point that at a file so the
-# diagnostics (MCP spawns, tool failures, wired turns) land somewhere readable
-# instead of the default stderr-only / dropped-below-WARNING behaviour.
-logging.basicConfig(
-    filename="/tmp/cai.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+# every module logs through getLogger("cai"); point that logger (never the
+# root) at a file so the diagnostics land somewhere readable without touching
+# a host app's logging - its records don't leak in, cai's don't leak out.
+_log = logging.getLogger("cai")
+if not _log.handlers:
+    _handler = logging.FileHandler("/tmp/cai.log")
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _log.addHandler(_handler)
+    _log.setLevel(logging.INFO)
+    _log.propagate = False
 
 from cai.paths import safe_path, scratch_dir
 from cai.ui import current_ui
