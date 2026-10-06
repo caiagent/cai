@@ -27,6 +27,11 @@ Optional keys (read via load_optional, never required) may also appear:
                          at its Decisions endpoint (model "~typesafe/jev-latest").
                          no default: both refuse to run without it (the CLI
                          also takes --model).
+  system_one_base_url  - the endpoint System One calls go to, when it is not
+                         `base_url` (default: `base_url`).
+
+A third file, system_one_api_key, is the bearer token for System One calls when
+it differs from the chat one (default: the api_key file).
 
 Every field, required or optional, can be SHADOWED from init.py: a cai.settings
 attribute of the same name that is not None wins over the config.json value
@@ -83,6 +88,10 @@ def config_path():
 
 def api_key_path():
     return os.path.join(config_dir(), "api_key")
+
+
+def system_one_api_key_path():
+    return os.path.join(config_dir(), "system_one_api_key")
 
 
 def _settings_value(key):
@@ -177,6 +186,23 @@ def load_api_key():
         raise FileNotFoundError(
             f"no API key found at {path}\n"
             f"create it with:  mkdir -p {config_dir()} && echo 'sk-or-...' > {path}")
+    with open(path) as f:
+        key = f.read().strip()
+    if not key:
+        raise ValueError(f"API key file {path} is empty")
+    return key
+
+
+def load_system_one_api_key():
+    """the System One bearer token: a cai.settings `system_one_api_key`, else
+    ~/.config/cai/system_one_api_key, else the chat key (load_api_key) - so a
+    config without a separate System One stack keeps working unchanged."""
+    value = _settings_value("system_one_api_key")
+    if value is not None:
+        return value
+    path = system_one_api_key_path()
+    if not os.path.exists(path):
+        return load_api_key()
     with open(path) as f:
         key = f.read().strip()
     if not key:

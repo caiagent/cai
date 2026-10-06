@@ -223,12 +223,12 @@ def _turn(api,
                           interrupt=interrupt)
     for delta_content, delta_reasoning, finished_tool_calls, chunk_usage in stream_gen:
         if _interrupted(interrupt): break
-        if delta_content:
-            content_parts.append(delta_content)
-            yield Event(type=EventType.CONTENT, text=delta_content)
         if delta_reasoning:
             reasoning_parts.append(delta_reasoning)
             yield Event(type=EventType.REASONING, text=delta_reasoning)
+        if delta_content:
+            content_parts.append(delta_content)
+            yield Event(type=EventType.CONTENT, text=delta_content)
         if finished_tool_calls is not None:
             tool_calls = finished_tool_calls
         if chunk_usage:

@@ -2,7 +2,8 @@
 
 decide(state, questions) is to SystemOneApi what call_llm is to OpenAiApi: the
 stateless layer-1 entry a hook, a command or a plain script calls, with the
-config defaults (model, endpoint, key) resolved here instead of by every
+config defaults (model, endpoint, key - its own stack, see
+default_api) resolved here instead of by every
 caller. no loop, no stream, no tools - one POST, typed answers back.
 
     answers, usage = cai.decide(
@@ -28,13 +29,16 @@ def default_model():
                      f"{config.config_path()}")
 
 
-def default_api():
-    """a SystemOneApi on the configured base_url and api key - the same
-    resolution Agent uses for its OpenAiApi (config file, cai.settings shadow,
-    --base-url/--api-key overrides)."""
-    cfg = config.load_config()
-    return SystemOneApi(cfg.base_url,
-                        config.load_api_key(),
+def default_api(base_url=None, api_key=None):
+    """a SystemOneApi on the System One stack: `system_one_base_url` and the
+    system_one_api_key file, each falling back to the chat `base_url` / api_key
+    (with their cai.settings shadow and --base-url/--api-key overrides). a
+    base_url or api_key the caller passes wins over both."""
+    if base_url is None: base_url = config.load_optional("system_one_base_url")
+    if base_url is None: base_url = config.load_config().base_url
+    if api_key is None: api_key = config.load_system_one_api_key()
+    return SystemOneApi(base_url,
+                        api_key,
                         ssl_verify=config.load_optional("ssl_verify", True))
 
 

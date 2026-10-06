@@ -263,6 +263,22 @@ def test_system_one_model_flag_overrides_config(tmp_path, monkeypatch, capsys):
     assert post.data['model'] == "circuit-8b"
 
 
+def test_system_one_flags_target_the_system_one_stack(tmp_path, monkeypatch, capsys):
+    def reply(state):
+        return {"type": "noul", "noul": 0.5}
+    post = _install_system_one(tmp_path, monkeypatch, reply)
+    with open(config.config_path()) as f:
+        data = json.load(f)
+    data['system_one_base_url'] = "https://jev.test/v1"
+    with open(config.config_path(), "w") as f:
+        json.dump(data, f)
+    code = cli.main(["--system-one", "--base-url", "https://flag.test/v1",
+                     "--api-key", "sk-flag", "-p", "q"])
+    assert code == 0
+    assert post.calls[-1]['url'] == "https://flag.test/v1/systemone"
+    assert post.calls[-1]['kwargs']['headers']['Authorization'] == "Bearer sk-flag"
+
+
 def test_system_one_model_must_come_from_config(tmp_path, monkeypatch, capsys):
     def reply(state):
         return {"type": "noul", "noul": 0.5}

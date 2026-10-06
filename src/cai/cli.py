@@ -486,7 +486,9 @@ def _run_system_one(args, prompt, parser):
     state - every input line in turn under --line-by-line (lines.run schedules
     the calls, --cores at a time), else the whole of --file or piped stdin.
     the call is cai.decide's; its model and api are resolved once, up front,
-    so a missing `system_one_model` fails before any line is read."""
+    so a missing `system_one_model` fails before any line is read. here
+    --base-url / --api-key target the System One stack, beating its
+    `system_one_*` settings."""
     from cai import decision
     from cai.api import ApiError
 
@@ -496,7 +498,7 @@ def _run_system_one(args, prompt, parser):
             model = decision.default_model()
         except ValueError as e:
             parser.error(f"{e} or pass --model")
-    api = decision.default_api()
+    api = decision.default_api(base_url=args.base_url, api_key=args.api_key)
     questions = {}
     questions['answer'] = _system_one_question(args, prompt)
 

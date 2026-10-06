@@ -305,8 +305,9 @@ def stats(ctx):
 ```
 
 Typed decisions go through `cai.decide` — the System One call (model from the
-config's `system_one_model`, endpoint and key from the same config the agent
-uses; pass `model=`/`api=` to bypass it). Questions and answers are the wire
+config's `system_one_model`, endpoint from `system_one_base_url` and key from
+`~/.config/cai/system_one_api_key`, each falling back to the agent's own;
+pass `model=`/`api=` to bypass it). Questions and answers are the wire
 shapes: `noul` (yes/no probability), `choice`, `score`.
 
 ```python

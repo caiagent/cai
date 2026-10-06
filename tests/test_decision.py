@@ -117,6 +117,57 @@ def test_default_api_honors_runtime_overrides(tmp_path, monkeypatch):
     assert post.calls[-1]['kwargs']['headers']['Authorization'] == "Bearer sk-override"
 
 
+def write_system_one_stack(base_url="https://jev.test/v1", key="sk-jev"):
+    with open(config.config_path()) as f:
+        data = json.load(f)
+    if base_url is not None:
+        data['system_one_base_url'] = base_url
+    with open(config.config_path(), "w") as f:
+        json.dump(data, f)
+    if key is not None:
+        with open(config.system_one_api_key_path(), "w") as f:
+            f.write(key + "\n")
+
+
+def test_api_uses_its_own_stack_when_configured(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    write_system_one_stack()
+    post = install_post(monkeypatch)
+    decision.decide("s", questions(), model="m")
+    assert post.calls[-1]['url'] == "https://jev.test/v1/systemone"
+    assert post.calls[-1]['kwargs']['headers']['Authorization'] == "Bearer sk-jev"
+
+
+def test_each_stack_part_falls_back_on_its_own(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    write_system_one_stack(base_url=None)
+    post = install_post(monkeypatch)
+    decision.decide("s", questions(), model="m")
+    assert post.calls[-1]['url'] == "https://example.test/v1/systemone"
+    assert post.calls[-1]['kwargs']['headers']['Authorization'] == "Bearer sk-jev"
+
+
+def test_own_stack_beats_chat_runtime_overrides(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    write_system_one_stack()
+    post = install_post(monkeypatch)
+    config.set_override("base_url", "https://override.test/v1")
+    config.set_override("api_key", "sk-override")
+    decision.decide("s", questions(), model="m")
+    assert post.calls[-1]['url'] == "https://jev.test/v1/systemone"
+    assert post.calls[-1]['kwargs']['headers']['Authorization'] == "Bearer sk-jev"
+
+
+def test_default_api_arguments_beat_the_stack(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    write_system_one_stack()
+    post = install_post(monkeypatch)
+    given = decision.default_api(base_url="https://arg.test/v1", api_key="sk-arg")
+    decision.decide("s", questions(), model="m", api=given)
+    assert post.calls[-1]['url'] == "https://arg.test/v1/systemone"
+    assert post.calls[-1]['kwargs']['headers']['Authorization'] == "Bearer sk-arg"
+
+
 def test_missing_model_is_a_config_error_before_any_request(tmp_path, monkeypatch):
     write_config(tmp_path, monkeypatch, model=None)
     post = install_post(monkeypatch)
