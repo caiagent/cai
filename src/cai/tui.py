@@ -1664,7 +1664,7 @@ class _StatusWidget:
     and tools and path grants/denies (read over the wire), the live sub-agents
     (fed by the poll loop), and the pending counts. toggle() shows/hides it and paints at once; while
     visible the poll loop refreshes it every tick so :skills / :tools / a model
-    switch / a sub-agent starting show up without any call-site wiring. hidden
+    switch / a sub-agent starting show up without any call-site wiring. visible
     is the start state every session."""
 
     def __init__(self, screen, client, pending):
@@ -1672,7 +1672,7 @@ class _StatusWidget:
         self._client = client
         self._pending = pending
         self._lock = threading.Lock()
-        self._visible = False
+        self._visible = True
         self._subagents = []
 
     @property
@@ -1787,7 +1787,7 @@ class _Pending:
         if not lines:
             self._screen.remove_widget("pending")
             return
-        self._screen.add_widget("pending", lines)
+        self._screen.add_widget("pending", lines, bottom=True)
 
 
 # how often the poll loop re-reads the agent (and the agents sockets) for state
@@ -2214,6 +2214,7 @@ def run(*,
 
     pending = _Pending(screen)
     status_widget = _StatusWidget(screen, client, pending)
+    status_widget.refresh()
     worker = _Worker(client, screen, jobs, stop, status, env.settings, pending)
     worker.start()
     status_loop = _StatusLoop(status, stop)

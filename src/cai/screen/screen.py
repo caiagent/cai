@@ -136,6 +136,10 @@ class Screen:
         # content render so they always sit above the conversation.
         self._widgets = {}
 
+        # bottom hover widgets: name -> pre-styled lines, stacked up from the
+        # bottom-right corner of the viewport, just above the prompt.
+        self._bottom_widgets = {}
+
         # chips with an explicit position: name -> Chip, painted at their
         # own (row, col) anchor instead of the top-right stack. chip
         # timeouts live in _chip_timers so replacing a chip cancels the
@@ -465,21 +469,26 @@ class Screen:
         finally:
             self.pop_focus()
 
-    def add_widget(self, name, lines):
+    def add_widget(self, name, lines, bottom=False):
         """add or replace a hover widget: a block of pre-styled lines painted
-        over the conversation, anchored top-right. widgets stack vertically in
-        insertion order; replacing an existing name keeps its slot. lines carry
-        their own SGR styling - the screen just places them."""
+        over the conversation, anchored top-right (bottom-right, just above the
+        prompt, with bottom=True). widgets stack vertically in insertion order;
+        replacing an existing name keeps its slot. lines carry their own SGR
+        styling - the screen just places them."""
         with self._render_lock:
-            self._widgets[name] = list(lines)
+            if bottom:
+                self._bottom_widgets[name] = list(lines)
+            else:
+                self._widgets[name] = list(lines)
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
 
     def remove_widget(self, name):
         """remove a hover widget. unknown names are ignored."""
         with self._render_lock:
-            if name not in self._widgets: return
-            del self._widgets[name]
+            stacked = self._widgets.pop(name, None)
+            bottom = self._bottom_widgets.pop(name, None)
+            if stacked is None and bottom is None: return
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
 
@@ -520,12 +529,26 @@ class Screen:
 
     def _positioned_cells(self):
         """(vrow, col, text) placements for the positioned chips, one cell
-        per framed line, anchored at each chip's (row, col)."""
+        per framed line, anchored at each chip's (row, col), then the bottom
+        widgets stacked up from the viewport's bottom-right corner."""
         cells = []
         for chip in self._positioned_chips.values():
             row, col = chip.position
             for i, line in enumerate(chip.lines()):
                 cells.append((row + i, col, line))
+        lines = []
+        for name in self._bottom_widgets:
+            if lines:
+                lines.append('')
+            lines.extend(self._bottom_widgets[name])
+        if not lines: return cells
+        rows = self._layout.content_rows
+        cols = self._layout.cols
+        top = rows - len(lines)
+        for i, line in enumerate(lines):
+            width = len(ansi_strip(line))
+            if width == 0: continue
+            cells.append((top + i, max(0, cols - width), line))
         return cells
 
     def _widget_lines(self):

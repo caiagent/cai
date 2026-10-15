@@ -89,14 +89,27 @@ class Skill:
 
 
 def _allowed_paths_slot():
-    """fills {{allowed_paths}}: the CAI_ALLOWED_PATHS grants, one realpath'd
-    absolute path per line - the same list safe_path and the python jail
-    honour - or "(none)" when nothing is granted, so the skill text never
-    ends on a dangling colon."""
-    roots = paths.allowed_paths()
-    if not roots:
-        return "(none)"
-    return "\n".join(roots)
+    """fills {{allowed_paths}}: the working directory by its real path, then
+    the CAI_ALLOWED_PATHS grants labelled as extras on top of it, then the
+    CAI_DISALLOWED_PATHS denies - realpath'd, the same lists safe_path and the
+    python jail honour. naming the cwd keeps the model from mistaking a grant
+    for its working directory."""
+    lines = [f"working directory (relative paths resolve here): {os.path.realpath(os.getcwd())}"]
+    granted = paths.allowed_paths()
+    if not granted:
+        lines.append("extra granted paths: (none)")
+    else:
+        lines.append("extra granted paths, in addition to the working directory (not your cwd):")
+        for root in granted:
+            lines.append(f"- {root}")
+    denied = paths.disallowed_paths()
+    if not denied:
+        lines.append("denied paths: (none)")
+    else:
+        lines.append("denied paths (never touch, even inside the above):")
+        for root in denied:
+            lines.append(f"- {root}")
+    return "\n".join(lines)
 
 
 def _skill_path(name, dirs):

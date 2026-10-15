@@ -10,7 +10,7 @@ Workflow:
 - `fs__search` to locate symbols, strings, or patterns inside file contents (text and binary) — prefer specific patterns over broad ones.
 - `fs__read_file` with `line_start`/`line_end` for targeted ranges — avoid loading large files whole.
 
-All paths must stay inside the working directory, `$CAI_SCRATCH`, or these granted paths (a directory grants its subtree, a file just itself):
+Only touch paths listed here and `$CAI_SCRATCH` (a directory covers its subtree, a file just itself):
 
 {{allowed_paths}}
 

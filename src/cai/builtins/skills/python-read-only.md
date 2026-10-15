@@ -10,9 +10,8 @@ calls. `print()` what you want back.
 ## Rules
 
 - One-shot: fresh interpreter every call, no variables survive between calls.
-- Read/List capabilities only available to file-system at
-  current-working-directory, scratch (`os.environ['CAI_SCRATCH']`) and these
-  granted paths (a directory grants its subtree, a file just itself):
+- Read/List only paths listed here and scratch (`os.environ['CAI_SCRATCH']`)
+  (a directory covers its subtree, a file just itself):
 
   {{allowed_paths}}
 

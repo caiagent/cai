@@ -67,7 +67,7 @@ class _WidgetHost:
     def __init__(self):
         self.widgets = {}
 
-    def add_widget(self, name, lines):
+    def add_widget(self, name, lines, bottom=False):
         self.widgets[name] = lines
 
     def remove_widget(self, name):
@@ -116,6 +116,7 @@ class _ChipHost:
     def __init__(self):
         self._widgets = {}
         self._positioned_chips = {}
+        self._bottom_widgets = {}
         self._chip_timers = {}
         self._render_lock = threading.RLock()
         self._focus_stack = ['overlay']
@@ -280,7 +281,8 @@ def test_status_widget_toggles_and_refreshes_only_while_visible():
     pending = _Pending(host)
     client = _StatusClient()
     widget = _StatusWidget(host, client, pending)
-    assert widget.visible is False
+    assert widget.visible is True                   # shown by default
+    widget.toggle()
     widget.refresh()
     assert "status" not in host.widgets             # hidden: refresh paints nothing
     widget.toggle()

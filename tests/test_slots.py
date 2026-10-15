@@ -162,10 +162,14 @@ def test_agent_wires_itself_into_slot_context(tmp_path):
 
 def test_allowed_paths_slot_fills_none_without_grants(tmp_path, monkeypatch):
     monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    monkeypatch.delenv("CAI_DISALLOWED_PATHS", raising=False)
     env = _env_with_skill(tmp_path, "jail", "Granted:\n{{allowed_paths}}")
 
     registry = _registry(env, "jail")
-    assert "Granted:\n(none)" in registry.system_prompt
+    cwd = os.path.realpath(os.getcwd())
+    assert f"Granted:\nworking directory (relative paths resolve here): {cwd}" in registry.system_prompt
+    assert "extra granted paths: (none)" in registry.system_prompt
+    assert "denied paths: (none)" in registry.system_prompt
 
 
 def test_allowed_paths_slot_lists_grants_realpathd(tmp_path, monkeypatch):
@@ -180,7 +184,7 @@ def test_allowed_paths_slot_lists_grants_realpathd(tmp_path, monkeypatch):
     env = _env_with_skill(tmp_path, "jail", "Granted:\n{{allowed_paths}}")
 
     registry = _registry(env, "jail")
-    expected = "Granted:\n" + os.path.realpath(str(data)) + "\n" + os.path.realpath(str(note))
+    expected = "(not your cwd):\n- " + os.path.realpath(str(data)) + "\n- " + os.path.realpath(str(note))
     assert expected in registry.system_prompt
     assert str(link) not in registry.system_prompt
 
@@ -189,10 +193,20 @@ def test_allowed_paths_slot_reads_fresh_every_turn(tmp_path, monkeypatch):
     monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
     env = _env_with_skill(tmp_path, "jail", "{{allowed_paths}}")
     registry = _registry(env, "jail")
-    assert "(none)" in registry.system_prompt
+    assert "extra granted paths: (none)" in registry.system_prompt
 
     monkeypatch.setenv("CAI_ALLOWED_PATHS", str(tmp_path))
     assert os.path.realpath(str(tmp_path)) in registry.system_prompt
+
+
+def test_allowed_paths_slot_lists_denies(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    monkeypatch.setenv("CAI_DISALLOWED_PATHS", str(tmp_path))
+    env = _env_with_skill(tmp_path, "jail", "{{allowed_paths}}")
+
+    registry = _registry(env, "jail")
+    expected = "denied paths (never touch, even inside the above):\n- " + os.path.realpath(str(tmp_path))
+    assert expected in registry.system_prompt
 
 
 def test_multiline_slot_inherits_its_line_indent(tmp_path):
