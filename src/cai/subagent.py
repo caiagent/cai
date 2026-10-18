@@ -111,6 +111,39 @@ def _inherit_tools(parent, names):
     return chosen
 
 
+def _split_grant(requested, allowed):
+    """split `requested` names into (granted, dropped) against `allowed`, in
+    request order - what the launch result reports back to the parent."""
+    granted = []
+    dropped = []
+    if not requested:
+        return granted, dropped
+    allowed = set(allowed)
+    for name in requested:
+        if name in allowed:
+            granted.append(name)
+            continue
+        dropped.append(name)
+    return granted, dropped
+
+
+def _names(names):
+    """a comma list for the launch result; 'none' when empty."""
+    if not names:
+        return "none"
+    return ", ".join(names)
+
+
+def _launched_text(name, tools, skills, dropped):
+    """the launch result: what the child was actually granted - its effective
+    tools (its skills' tools included) and skills - so the parent sees the
+    outcome instead of assuming it."""
+    text = f"Launched sub-agent '{name}' with tools: {_names(tools)}; skills: {_names(skills)}."
+    if dropped:
+        text += f" Dropped (not yours): {_names(dropped)}."
+    return text + f" Collect its result with wait_agent('{name}')."
+
+
 def _inherit_skills(parent, names):
     """the requested skills the parent itself has, in request order. reduce-only,
     like the tools: an unknown skill is dropped rather than granted."""
@@ -246,12 +279,16 @@ def _own_child(parent_name, agent, server, prompt, deliveries=None):
             log.exception("sub-agent %r: closing child agent failed", agent.name)
 
 
-_LAUNCH_DOC = """Launch ONE background sub-agent, return its agent_id (name). Call like launch_agent(prompt="<self-contained task>", name="audit-auth-flow").
+_LAUNCH_DOC = """Launch ONE background sub-agent, return its agent_id (name). Call like launch_agent(prompt="<self-contained task>", name="audit-auth-flow", skills=["fs-read-only"]).
 
-    The child shares your working directory but not your conversation, so
-    ``prompt`` must be self-contained. ``tools`` and ``skills`` are each a LIST
-    of names (a subset of your own; nothing is inherited by default);
-    ``model`` / ``system_prompt`` override the inherited model / prompt. When it
+    Pass ``tools`` and/or ``skills`` - at least one: the child gets exactly
+    these (a skill brings its own tools), nothing else (``tools=[]`` for
+    none). The child shares your working directory but not your
+    conversation, so ``prompt`` must be self-contained. ``tools`` and
+    ``skills`` are each a LIST of exact names, a subset of your own (a
+    skill's name is the 'skill:' line above it in your prompt); the result
+    lists the child's tools and skills and any name dropped. ``model`` /
+    ``system_prompt`` override the inherited model / prompt. When it
     finishes its result is delivered to you as a message; you can also collect
     it with wait_agent. Use the returned name — it may be de-duplicated.
     """
@@ -275,6 +312,8 @@ def _launch_agent(parent,
         name = _unique_name(parent, name)
         child_tools = _inherit_tools(parent, tools)
         child_skills = _inherit_skills(parent, skills)
+        _granted, dropped_tools = _split_grant(tools, parent.tools)
+        _granted, dropped_skills = _split_grant(skills, parent.skills)
         child_model = model or parent.model
         child_prompt = _child_system_prompt(parent, system_prompt)
         agent = Agent(name=name,
@@ -299,8 +338,7 @@ def _launch_agent(parent,
                                   name=f"cai-sub-{name}")
         parent.children.append(name)
         thread.start()
-        return (f"Launched sub-agent '{name}'. Collect its result with "
-                f"wait_agent('{name}').")
+        return _launched_text(name, agent.tools, agent.skills, dropped_tools + dropped_skills)
     except Exception as e:
         log.exception("launch_agent failed")
         return f"Error: launch_agent failed: {type(e).__name__}: {e}"
@@ -316,6 +354,9 @@ def make_launch_agent(parent, deliveries):
                      skills: list[str] = None,
                      model: str = "",
                      system_prompt: str = "") -> str:
+        if tools is None and skills is None:
+            return ("Error: pass tools and/or skills - the child gets only what "
+                    "you list (tools=[] for a tool-less child).")
         return _launch_agent(parent, prompt, name, tools, skills, model, system_prompt, deliveries)
     launch_agent.__doc__ = _LAUNCH_DOC
     return launch_agent

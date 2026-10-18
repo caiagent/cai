@@ -77,7 +77,7 @@ def test_slot_context_carries_agent_and_skill(tmp_path):
 def test_unknown_slot_fills_empty(tmp_path):
     env = _env_with_skill(tmp_path, "memo", "before {{missing}} after")
     registry = _registry(env, "memo")
-    assert registry.system_prompt == "before  after"
+    assert registry.system_prompt == "skill: memo\nbefore  after"
 
 
 def test_raising_slot_fills_error_marker(tmp_path):
@@ -99,7 +99,7 @@ def test_none_result_fills_empty(tmp_path):
     env.register_slot(quiet)
 
     registry = _registry(env, "memo")
-    assert registry.system_prompt == "xy"
+    assert registry.system_prompt == "skill: memo\nxy"
 
 
 def test_tools_slot_still_builtin(tmp_path):
@@ -224,3 +224,9 @@ def test_multiline_slot_inherits_its_line_indent(tmp_path):
 
     registry = _registry(env, "memo")
     assert "- Items:\n\n  one\n  two\n\n- Next" in registry.system_prompt
+
+
+def test_each_skill_body_is_led_by_its_name(tmp_path):
+    env = _env_with_skill(tmp_path, "memo", "# Skill: Memo Pad\nbody")
+    registry = _registry(env, "memo")
+    assert registry.system_prompt == "skill: memo\n# Skill: Memo Pad\nbody"

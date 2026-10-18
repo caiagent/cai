@@ -255,14 +255,16 @@ class SkillsRegistry:
     @property
     def system_prompt(self):
         """the activated skills' prompt bodies, foundation-first, slots filled,
-        joined - or None when no skill contributed a prompt. slots resolve fresh
-        on every read (the loop reads once per model call), so a filler's latest
-        state reaches the model without any tool call."""
+        joined - or None when no skill contributed a prompt. each body is led by
+        a 'skill: <name>' line, so the model knows the registry name it grants a
+        sub-agent by. slots resolve fresh on every read (the loop reads once per
+        model call), so a filler's latest state reaches the model without any
+        tool call."""
         parts = []
         for name, skill in self._skills.items():
             body = skill.body.strip()
             if not body: continue
-            parts.append(self._fill_slots(body, name))
+            parts.append(f"skill: {name}\n" + self._fill_slots(body, name))
         if not parts:
             return None
         return "\n\n".join(parts)

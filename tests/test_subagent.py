@@ -18,6 +18,8 @@ from cai.subagent import _inherit_skills
 from cai.subagent import _launch_agent
 from cai.subagent import _wait_agent
 from cai.subagent import _kill_agent
+from cai.subagent import make_launch_agent
+from cai.tools import schema_from_function
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +158,31 @@ def test_launch_dedupes_duplicate_names_and_returns_the_new_one():
     assert parent.children == ["twin", "twin-2"]
 
 
+def test_launch_tool_requires_tools_or_skills():
+    parent = make_parent(FakeApi())
+    launch_agent = make_launch_agent(parent, {})
+    schema = schema_from_function(launch_agent)
+    assert "tools" not in schema["function"]["parameters"]["required"]
+    message = launch_agent(prompt="p", name="w")
+    assert message.startswith("Error: pass tools and/or skills")
+    assert parent.children == []
+
+
+def test_launch_reports_granted_and_dropped_names():
+    parent = make_parent(FakeApi(chunks=["x"]), tools=[foo, bar], skills=["subagents", "fs"])
+    message = _launch_agent(parent, "t", "w", tools=["foo", "ghost"], skills=["fs", "nope"])
+    assert "tools: foo" in message
+    assert "skills: fs, fs-read-only." in message
+    assert "Dropped (not yours): ghost, nope." in message
+
+
+def test_launch_with_no_tools_says_none():
+    parent = make_parent(FakeApi(chunks=["x"]), tools=[foo])
+    message = _launch_agent(parent, "t", "w", tools=[])
+    assert "tools: none; skills: none." in message
+    assert "Dropped" not in message
+
+
 def test_wait_attached_mid_run_returns_the_answer():
     api = GatedApi(["the answer"])
     parent = make_parent(api)
@@ -243,7 +270,7 @@ def test_subagents_skill_bootstraps_the_tools():
 def test_bootstrapped_tools_drive_a_child_end_to_end():
     api = GatedApi(["hi"])
     agent = Agent(model="m", api=api, skills=["subagents"])
-    out = agent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
+    out = agent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1", "tools": []})
     assert "c1" in out
     assert api.started.wait(5)
     box = {}
@@ -362,7 +389,7 @@ def test_owner_failure_is_steered_to_a_served_parent(monkeypatch):
     thread = threading.Thread(target=served.serve, daemon=True)
     thread.start()
     try:
-        out = parent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
+        out = parent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1", "tools": []})
         assert "c1" in out
         assert api.started.wait(5)
         landed = None
@@ -395,7 +422,7 @@ def test_child_result_steers_an_idle_served_parent():
     thread = threading.Thread(target=served.serve, daemon=True)
     thread.start()
     try:
-        out = parent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
+        out = parent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1", "tools": []})
         assert "c1" in out
         assert api.started.wait(5)
         api.release.set()                 # child finishes, then steers its result up
