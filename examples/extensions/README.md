@@ -42,3 +42,5 @@ observers too; `compact`'s README shows `after_run` as a second trigger.
 - `ask` — tools that question the human through `cai.current_ui()`.
 - `memory` — a `{{memory__notes}}` slot pushes a note store into the prompt.
 - `clone` / `summarize` — `:`-commands that checkpoint and branch a session.
+- `markdown` — a `@cai.renderer("response")` paints the assistant's markdown in
+  the TUI, re-rendered in place as it streams.

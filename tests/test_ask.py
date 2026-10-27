@@ -150,7 +150,7 @@ def _plain_lines(screen):
 
 def test_worker_request_becomes_live_block_and_keys_answer_it():
     screen = FakeScreen()
-    screen.write("hello\n", kind=Screen.LLM)
+    screen.write("hello\n", kind=Screen.RESPONSE)
     results = {}
 
     def worker():
@@ -198,7 +198,7 @@ def test_live_cursor_line_counts_wrapped_body_rows():
     # the parked cursor must land on the yes/no row, not `logical index`
     # rows below the segment start (which is a body row when it wrapped)
     screen = FakeScreen()
-    screen.write("hello\n", kind=Screen.LLM)
+    screen.write("hello\n", kind=Screen.RESPONSE)
     body = "x" * 200
     screen._req_pending = ({"kind": "confirm", "title": "Allow?", "body": body},
                            threading.Event(), {})

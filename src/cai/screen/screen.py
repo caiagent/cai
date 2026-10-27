@@ -55,7 +55,7 @@ class Screen:
     # transitions on state change (or on a fresh segment, so a stream of
     # chunks that happens to break on '\n' keeps its color).
     USER      = 'user'
-    LLM       = 'llm'
+    RESPONSE  = 'response'
     REASONING = 'reasoning'
     META      = 'meta'
     TOOL      = 'tool'
@@ -65,7 +65,7 @@ class Screen:
 
     _KIND_STYLES = {
         USER:      SGR_BOLD,
-        LLM:       SGR_CYAN,
+        RESPONSE:  SGR_CYAN,
         REASONING: SGR_DIM_GRAY,
         META:      SGR_DIM_GRAY,
         TOOL:      SGR_DIM_GRAY,
@@ -80,7 +80,7 @@ class Screen:
     # pickers read the same.
     _KIND_GUTTERS = {
         USER:      SGR_GREEN,
-        LLM:       SGR_CYAN,
+        RESPONSE:  SGR_CYAN,
         REASONING: SGR_DIM_GRAY,
         META:      SGR_DIM_GRAY,
         TOOL:      SGR_YELLOW,
@@ -91,7 +91,7 @@ class Screen:
 
     # back-compat aliases still referenced by cli.py and tests.
     _USER_STYLE   = SGR_BOLD
-    _LLM_STYLE    = SGR_CYAN
+    _RESPONSE_STYLE = SGR_CYAN
     _META_STYLE   = SGR_DIM_GRAY
     _ERROR_STYLE  = SGR_BOLD_RED
     _RESET        = SGR_RESET
@@ -199,7 +199,7 @@ class Screen:
         # track whether new content arrived while user is scrolled up
         self._new_content_below = False
 
-        # what's currently being written (see Screen.USER/LLM/...).
+        # what's currently being written (see Screen.USER/RESPONSE/...).
         # transitions emit SGR automatically; a fresh buffer segment in the
         # same kind re-emits the style so the color survives \n boundaries.
         self._current_kind = None
@@ -271,7 +271,7 @@ class Screen:
     def write(self, text, kind=None, block=False):
         """append text to the content buffer and refresh the viewport.
 
-        when kind is one of the class kind constants (USER, LLM, ...), the
+        when kind is one of the class kind constants (USER, RESPONSE, ...), the
         screen owns styling: the caller writes plain text and the screen
         emits SGR transitions on state change, and re-emits the active style
         at the start of a fresh buffer segment so streamed chunks that
@@ -300,33 +300,96 @@ class Screen:
                 text = self._apply_kind(text, kind, separated=block)
 
             self._buffer.append_text(text, gutter=self._kind_gutter(kind))
-            total = self._buffer.line_count()
-            content_rows = self._layout.content_rows
+            self._after_content_change()
 
-            if self._state.auto_scroll:
-                self._state.viewport_offset = max(0, total - content_rows)
-                # pin the cursor to the tail while following the stream -
-                # otherwise G drops cursor_row on the old bottom and each
-                # new line pushes the viewport past it, stranding the block
-                # cursor above the viewport.
-                self._state.cursor_row = max(0, total - 1)
-                self._new_content_below = False
-            else:
-                self._new_content_below = True
+    def _after_content_change(self):
+        """the tail every content mutation shares (write, write_block,
+        replace_block): follow the stream when auto-scrolling, then paint -
+        deferred while an overlay owns the screen, and throttled to ~60fps
+        otherwise. called under the render lock."""
+        total = self._buffer.line_count()
+        content_rows = self._layout.content_rows
 
-            # an overlay owns the screen - buffer the write but don't paint.
-            # the eventual pop_focus -> _restore_after_overlay does a full
-            # repaint with whatever accumulated.
-            if self._focus_stack[-1] != 'main':
-                self._write_pending = True
+        if self._state.auto_scroll:
+            self._state.viewport_offset = max(0, total - content_rows)
+            # pin the cursor to the tail while following the stream -
+            # otherwise G drops cursor_row on the old bottom and each
+            # new line pushes the viewport past it, stranding the block
+            # cursor above the viewport.
+            self._state.cursor_row = max(0, total - 1)
+            self._new_content_below = False
+        else:
+            self._new_content_below = True
+
+        # an overlay owns the screen - buffer the write but don't paint.
+        # the eventual pop_focus -> _restore_after_overlay does a full
+        # repaint with whatever accumulated.
+        if self._focus_stack[-1] != 'main':
+            self._write_pending = True
+            return
+
+        # batch rendering: don't redraw more than ~60fps
+        now = time.monotonic()
+        if now - self._last_render_time >= _RENDER_INTERVAL:
+            self._stream_frame()
+        else:
+            self._write_pending = True
+
+    # --- rendered blocks: a block painted whole and repainted in place ---
+    #
+    # the transcript paints a block through a renderer (cai.renderer) as ONE
+    # buffer segment it keeps re-rendering while the block streams: write_block
+    # opens it and hands back its index, replace_block swaps its text. the
+    # same segment mechanics the live ask element uses (repaint_live).
+
+    def content_width(self, kind=None):
+        """the columns a block of `kind` may use: the terminal width minus
+        the kind's gutter - what a renderer gets as RenderContext.width."""
+        return max(1, self._cols - len(ansi_strip(self._kind_gutter(kind))))
+
+    def _block_text(self, text, kind):
+        """a rendered block as one self-contained segment: the kind's style
+        re-opened at its start (wrap_ansi tracks style per segment, and a
+        replace must not depend on what the open prefix once was) and a
+        closing newline so the next write lands on its own row and starts
+        its own segment."""
+        style = self._KIND_STYLES.get(kind, '')
+        if not text.endswith('\n'):
+            text = text + '\n'
+        return style + text
+
+    def write_block(self, text, kind=None):
+        """start a new logical block (a normalized one-blank-row boundary,
+        like write(block=True)) holding `text` whole, and return the index of
+        the buffer segment it lives in, for replace_block."""
+        with self._render_lock:
+            if self._resize_pending:
+                self._resize_pending = False
+                self._handle_resize()
+            self._start_block()
+            prev = self._current_kind
+            prefix = ''
+            if kind != prev and prev is not None and self._KIND_STYLES.get(prev):
+                prefix = SGR_RESET
+            self._current_kind = kind
+            self._buffer.append_text(prefix + self._block_text(text, kind),
+                                     gutter=self._kind_gutter(kind))
+            index = self._buffer.segment_count() - 1
+            self._after_content_change()
+            return index
+
+    def replace_block(self, index, text, kind=None):
+        """swap the text of the block segment write_block returned, in place;
+        only that segment is rewrapped. the viewport follows the stream the
+        way a write does."""
+        with self._render_lock:
+            if self._resize_pending:
+                self._resize_pending = False
+                self._handle_resize()
+            if index < 0 or index >= self._buffer.segment_count():
                 return
-
-            # batch rendering: don't redraw more than ~60fps
-            now = time.monotonic()
-            if now - self._last_render_time >= _RENDER_INTERVAL:
-                self._stream_frame()
-            else:
-                self._write_pending = True
+            self._buffer.replace_segment(index, self._block_text(text, kind))
+            self._after_content_change()
 
     def _begin_frame(self):
         """open a paint: the outermost frame hides the cursor so it does not

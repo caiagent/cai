@@ -46,8 +46,8 @@ def test_attach_view_replays_a_conversation():
 def test_attach_view_separates_blocks_with_one_blank_row():
     view = _AttachView(80)
     view.write("> hello\n", kind=Screen.USER, block=True)
-    view.write("world\n\n\n", kind=Screen.LLM, block=True)
-    view.write("again\n", kind=Screen.LLM, block=True)
+    view.write("world\n\n\n", kind=Screen.RESPONSE, block=True)
+    view.write("again\n", kind=Screen.RESPONSE, block=True)
     lines = []
     for line in view.get_lines(0, view.line_count()):
         lines.append(ansi_strip(line).strip("▌ "))
@@ -57,13 +57,13 @@ def test_attach_view_separates_blocks_with_one_blank_row():
 def test_attach_view_versions_every_write():
     view = _AttachView(80)
     before = view.version
-    view.write("chunk", kind=Screen.LLM)
+    view.write("chunk", kind=Screen.RESPONSE)
     assert view.version > before
 
 
 def test_attach_view_rewraps_to_a_new_width():
     view = _AttachView(80)
-    view.write("x" * 100 + "\n", kind=Screen.LLM)
+    view.write("x" * 100 + "\n", kind=Screen.RESPONSE)
     wide = view.line_count()
     view.rewrap(40)
     assert view.line_count() > wide

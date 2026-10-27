@@ -255,7 +255,7 @@ def test_replay_renders_turns_tools_and_reasoning_when_shown():
                              ("-> ls(path=/tmp)\n", Screen.TOOL),
                              ("<- ls: 5 chars\n", Screen.TOOL),
                              ("ok\n", Screen.REASONING),
-                             ("done\n", Screen.LLM)]
+                             ("done\n", Screen.RESPONSE)]
 
 
 def test_replay_skips_reasoning_when_hidden_or_unconfigured():
@@ -270,7 +270,7 @@ def test_replay_skips_reasoning_when_hidden_or_unconfigured():
         for _text, kind in screen.writes:
             kinds.append(kind)
         assert Screen.REASONING not in kinds
-        assert kinds == [Screen.USER, Screen.TOOL, Screen.TOOL, Screen.LLM]
+        assert kinds == [Screen.USER, Screen.TOOL, Screen.TOOL, Screen.RESPONSE]
 
 
 def test_replay_maps_a_tool_reply_without_a_known_call_to_a_placeholder():

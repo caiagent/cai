@@ -3,8 +3,9 @@
 An Environment holds what used to live in process-global class stores: the
 function tools registered via cai.tool, the skill-body slot fillers registered
 via cai.slot, the MCP servers declared via cai.mcp_server, the hooks and
-commands registered via cai.hook / cai.command, the discovered extension
-bundles, and the live Settings (cai.settings). An
+commands registered via cai.hook / cai.command, the display renderers
+registered via cai.renderer, the discovered extension bundles, and the live
+Settings (cai.settings). An
 Agent is constructed against an Environment (env=) and resolves everything
 install-wide through it, so two agents in one process can see two different
 installs, and a test builds a private empty one instead of resetting globals.
@@ -234,6 +235,7 @@ class Environment:
         self._declared_servers = {}  # server name -> spec dict
         self._hooks = []             # (event, fn) pairs, registration order
         self._commands = {}          # name -> cai.commands.Command
+        self._renderers = {}         # kind -> [fn], registration order (cai.renderer)
         # factories called with each new Agent to produce tools bound to it -
         # registered on the agent (unselected) until a skill or the user
         # selects them. default: the sub-agent tools.
@@ -402,6 +404,18 @@ class Environment:
     def commands(self):
         """the registered commands as name -> Command (a copy)."""
         return dict(self._commands)
+
+    def register_renderer(self, kind, fn):
+        """record a display renderer for a text kind (cai.renderer's backing;
+        the kind is validated by the decorator). renderers of one kind chain in
+        registration order, so the user's init.py - loaded last - renders
+        last."""
+        self._renderers.setdefault(kind, []).append(fn)
+
+    def renderers(self, kind):
+        """the renderers registered for `kind`, registration order (a copy);
+        [] when none - the transcript then paints the text as it is."""
+        return list(self._renderers.get(kind, []))
 
     def agent_tools(self, agent):
         """the tools bound to a new Agent, from every registered factory.

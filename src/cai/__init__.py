@@ -6,6 +6,7 @@ Layer 1: cai.llm    - the core agentic loop (call_llm).
                         answers about a state, no loop.
          cai.events - the Event value the loop yields, and EventType.
          cai.hooks  - the hook registry the loop fires.
+         cai.renderers - the display renderers the TUI paints through.
 Layer 2: cai.agent  - Agent (persistent conversation) + Run (one-shot execution).
 Entry:   cai.config      - bootstrap settings (API key, OpenRouter endpoint).
          cai.environment - the loaded install catalogue (tools/hooks/commands/
@@ -32,6 +33,7 @@ from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HookResult, HooksRegistry, ToolCall, hook, current_agent
 from cai.commands import Command, CommandContext, command
 from cai.skills import SlotContext, slot
+from cai.renderers import RenderContext, renderer
 from cai.llm import LLMError, MaxStepsReached, call_llm
 
 # Agent/Run/Environment stay lazy at runtime (see __getattr__ below) so
@@ -65,6 +67,8 @@ __all__ = [
     "command",
     "SlotContext",
     "slot",
+    "RenderContext",
+    "renderer",
     "ToolsRegistry",
     "tool",
     "wrap",

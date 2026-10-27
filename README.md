@@ -38,7 +38,7 @@ to the system prompt (then `--system-prompt`, when given).
 
 `~/.config/cai/init.py` is optional Python imported on every load, after the
 extensions — so its registrations win. Everything the SDK registers works
-here: MCP servers, settings, tools, hooks, commands.
+here: MCP servers, settings, tools, hooks, commands, renderers.
 
 ```python
 import cai
@@ -224,7 +224,8 @@ conversation plus the settings needed to resume it.
 
 An extension is a self-contained bundle directory carrying any of
 `skills/*.md`, `tools/*.py`, `mcps/*.py`, `init.py`, `hooks/init.py`,
-`commands/init.py`, and a `README.md`. Installing drops it under
+`commands/init.py`, and a `README.md` - its Python registering tools, hooks,
+commands, slots and renderers through the `cai.*` decorators. Installing drops it under
 `~/.config/cai/extensions/<name>/`, where `Environment.load()` discovers it.
 
 ```sh
@@ -256,6 +257,28 @@ mutation to an example):
 - `memory` — a persistent note store the model reads for free: a
   `{{memory__notes}}` slot pushes the latest entries into the system prompt
   each turn; tools only mutate the store.
+- `markdown` — a `cai.renderer` for the `response` kind: the TUI paints the
+  assistant's markdown as styled terminal text, live as it streams.
+
+### Renderers
+
+The TUI paints plain text; a **renderer** is how an extension reshapes a
+block before it is painted. Register one per text kind (`user`, `response`,
+`reasoning`, `tool`, `meta`, `error`), the same way as a hook or a command:
+
+```python
+@cai.renderer("response")
+def markdown(ctx: cai.RenderContext):
+    return md_to_ansi(ctx.text, width=ctx.width, base=ctx.style)
+```
+
+The transcript calls it with the **whole** block so far (`ctx.text`) - on
+every streamed chunk with `ctx.done` False, and once more with `ctx.done`
+True when the block ends - and repaints the block in place with what it
+returns (ANSI allowed; `None` leaves the text alone). Renderers of a kind
+chain in registration order, so your `init.py` has the last word; one that
+raises is logged and skipped. They are a display concern only: the
+conversation, saved sessions and `--tail` keep the raw text.
 
 ## SDK
 
