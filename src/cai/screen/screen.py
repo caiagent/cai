@@ -213,8 +213,7 @@ class Screen:
         # repaint reaches the terminal as one write with no cursor wandering.
         self._frame_depth = 0
 
-        self._tty_file = open('/dev/tty', 'rb+', buffering=0)
-        self._tty_fd = self._tty_file.fileno()
+        self._tty_file, self._tty_fd = self._open_tty()
         self._cooked_attrs = termios.tcgetattr(self._tty_fd)
 
         # core TUI components
@@ -228,6 +227,41 @@ class Screen:
         sys.stdout.flush()
 
         signal.signal(signal.SIGWINCH, self._on_resize)
+
+    @staticmethod
+    def _open_tty():
+        """the terminal to read keys from, as (file-or-None, fd). stdin is the
+        keyboard whenever it is a terminal - the same choice ncurses, readline
+        and every stdin-driven TUI make - so a sandbox that hands cai a pty on
+        fd 0 but no /dev/tty (no controlling terminal, a device node that is
+        not bind-mounted) still works. only when stdin is something else (a
+        pipe: `git diff | cai -i`) is /dev/tty opened, the way less and fzf
+        reach the keyboard behind a piped stdin; failing that, a terminal on
+        stderr or stdout is read instead (less falls back to fd 2 the same
+        way). the file is None for an inherited fd, which teardown must not
+        close."""
+        def terminal_fd(stream):
+            try:
+                if stream.isatty(): return stream.fileno()
+            except (AttributeError, ValueError, OSError):
+                pass
+            return None
+
+        fd = terminal_fd(sys.stdin)
+        if fd is not None: return None, fd
+        try:
+            f = open('/dev/tty', 'rb+', buffering=0)
+            return f, f.fileno()
+        except OSError as e:
+            tty_error = e
+        for stream in (sys.stderr, sys.stdout):
+            fd = terminal_fd(stream)
+            if fd is not None: return None, fd
+        raise OSError(tty_error.errno,
+                      "no terminal to read keys from: stdin is not a terminal "
+                      f"and /dev/tty could not be opened ({tty_error}); run cai "
+                      "with a terminal on stdin, or give it a prompt "
+                      "(cai -- ...) to run headless")
 
     @classmethod
     def _load_history(cls):
@@ -687,10 +721,11 @@ class Screen:
         sys.stdout.write(f'{MOUSE_OFF}{BRACKET_PASTE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
-        try:
-            self._tty_file.close()
-        except Exception:
-            pass
+        if self._tty_file is not None:
+            try:
+                self._tty_file.close()
+            except Exception:
+                pass
 
     def view_in_editor(self, text, *, suffix='.txt'):
         """open text in the editor read-only as a pager, then restore the screen.

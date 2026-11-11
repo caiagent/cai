@@ -223,24 +223,30 @@ def _kill_tree(proc):
 def _serve(agent, proc, req_r, rep_w, timeout):
     """single-threaded driver: while the child runs, serve its tool_call() requests on
     this (the run-loop) thread - so inner calls are dispatched exactly like
-    top-level ones. returns True if the child was killed on timeout. the child's
-    stdout/stderr go to a temp file, not a pipe, so this loop never blocks on
-    output and only ever reads the request channel."""
+    top-level ones. returns "timeout" if the child was killed on timeout,
+    "interrupted" if killed because the run's interrupt Event was set, None
+    when it ended on its own. the child's stdout/stderr go to a temp file, not
+    a pipe, so this loop never blocks on output and only ever reads the
+    request channel."""
     deadline = time.monotonic() + timeout
+    interrupt = getattr(agent, "interrupt", None)
     buf = bytearray()
     while True:
+        if interrupt is not None and interrupt.is_set():
+            _kill_tree(proc)
+            return "interrupted"
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _kill_tree(proc)
-            return True
-        ready, _, _ = select.select([req_r], [], [], min(remaining, 0.5))
+            return "timeout"
+        ready, _, _ = select.select([req_r], [], [], min(remaining, 0.2))
         if req_r not in ready:
             if proc.poll() is not None:
-                return False
+                return None
             continue
         chunk = os.read(req_r, 65536)
         if not chunk:
-            return False
+            return None
         buf.extend(chunk)
         while True:
             nl = buf.find(b"\n")
@@ -290,7 +296,7 @@ def _run_python(agent, code, timeout):
 
     out = tempfile.TemporaryFile()
     proc = None
-    timed_out = False
+    ended = None
     try:
         proc = subprocess.Popen([python, "-c", _bootstrap_source()],
                                 stdin=subprocess.PIPE,
@@ -308,7 +314,7 @@ def _run_python(agent, code, timeout):
     try:
         proc.stdin.write(code.encode("utf-8"))
         proc.stdin.close()
-        timed_out = _serve(agent, proc, req_r, rep_w, timeout)
+        ended = _serve(agent, proc, req_r, rep_w, timeout)
         proc.wait()
     finally:
         _kill_tree(proc)
@@ -317,8 +323,10 @@ def _run_python(agent, code, timeout):
         if staging:
             shutil.rmtree(staging, ignore_errors=True)
 
-    if timed_out:
+    if ended == "timeout":
         return f"Error: run timed out after {timeout}s"
+    if ended == "interrupted":
+        return "Error: run interrupted by user"
 
     out.seek(0)
     text = out.read().decode("utf-8", errors="replace")

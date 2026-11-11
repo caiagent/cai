@@ -577,6 +577,7 @@ class WiredAgent:
             value = {}
             value["name"] = agent.name
             value["model"] = agent.model
+            value["cwd"] = agent.get_cwd()
             value["children"] = children
             value["system_prompt"] = agent.system_prompt
             value["system_prompt_base"] = agent.system_prompt_base

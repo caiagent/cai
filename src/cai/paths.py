@@ -88,11 +88,15 @@ def disallowed_paths():
 
 
 def resolve_spec(spec):
-    """the realpath'd roots of a comma-separated files-or-directories spec
-    (the --allowed-paths / --disallowed-paths syntax), resolved against the
-    cwd. raises ValueError naming an entry that does not exist."""
+    """the realpath'd roots of a files-or-directories spec, resolved against
+    the cwd: a list of entries (the --allowed-paths / --disallowed-paths
+    flags, one path per argument) or a comma-separated string (the :allow /
+    :disallow commands). raises ValueError naming an entry that does not
+    exist."""
+    if isinstance(spec, str):
+        spec = spec.split(",")
     roots = []
-    for entry in spec.split(","):
+    for entry in spec:
         entry = entry.strip()
         if not entry:
             continue
@@ -115,7 +119,8 @@ def export(var, roots):
 
 def publish(var, spec):
     """resolve_spec + export in one step: the writer behind the
-    --allowed-paths / --disallowed-paths flags. an empty spec unsets the var;
+    --allowed-paths / --disallowed-paths flags (a list) and the :allow /
+    :disallow commands (a comma string). an empty spec unsets the var;
     a missing entry raises ValueError, leaving the var untouched."""
     export(var, resolve_spec(spec))
 

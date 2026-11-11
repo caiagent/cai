@@ -7,7 +7,7 @@ tool its Environment offers.
     cai.wrap registers a function tool that builds on another tool: its first
     parameter receives the target's dispatch at call time (see wrap).
   - MCP tools: each *.py under an extension's mcps/ dir (or the builtins/mcps/
-    dir shipped with cai) is an MCP server (a FastMCP stdio program), and
+    dir shipped with cai) is an MCP server (an MCPServer stdio program), and
     cai.mcp_server declares one programmatically into the env. This module
     spawns each as a subprocess, speaks the MCP JSON-RPC handshake over its
     stdin/stdout, and lists/calls its tools. MCP tool names are namespaced
@@ -35,6 +35,10 @@ from __future__ import annotations
 import os
 import sys
 import json
+import select
+import signal
+import threading
+import time
 import typing
 import atexit
 import inspect
@@ -53,30 +57,80 @@ log = logging.getLogger("cai")
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
+# how often a tool call blocked on its server re-checks the run's interrupt
+# Event (the same cadence cai.api uses for a model request).
+_POLL_TICK = 0.2
+
+
+class ToolInterrupted(Exception):
+    """a tool call was abandoned because the run's interrupt Event was set
+    while the server was still working on it."""
+
+
+def _interrupted(interrupt):
+    return interrupt is not None and interrupt.is_set()
+
 
 class LocalMCPServer:
     """One MCP stdio server subprocess, spoken to over line-delimited JSON-RPC.
     The loop runs tools one at a time, so this stays single-threaded: write a
-    request, read stdout lines until the matching id comes back."""
+    request, read stdout lines until the matching id comes back.
+
+    A request made with an `interrupt` Event is abandonable: the read polls
+    the Event every _POLL_TICK, and when it is set the server is killed -
+    its whole process tree, so a tool's own child (the fs search's rg) dies
+    with it - and ToolInterrupted is raised. That is the only stop that
+    reaches a sync tool mid-flight: the protocol's notifications/cancelled
+    cannot unwind a thread blocked in a sleep or a subprocess wait. The
+    server is respawned lazily by the next request, so the following tool
+    call just works, at the price of one startup.
+
+    The server leads its own session (start_new_session) so the tree kill
+    is one killpg, and so a Ctrl-C SIGINT on cai's own terminal never
+    reaches it: the loop decides when a tool stops, not the tty."""
 
     def __init__(self, command, label, env=None, cwd=None):
         self.label = label
         self._command = command
-        self._req_id = 0
-        popen_env = None
+        self._cwd = cwd
+        self._popen_env = None
         if env is not None:
-            popen_env = dict(os.environ)
-            popen_env.update(env)
-        self._process = subprocess.Popen(command,
+            self._popen_env = dict(os.environ)
+            self._popen_env.update(env)
+        self._req_id = 0
+        self._buf = bytearray()   # stdout bytes read but not yet split into lines
+        self._process = None
+        atexit.register(self.close)
+        self._spawn()
+
+    def _spawn(self):
+        """start (or restart) the server subprocess and run the handshake. the
+        request ids restart with it: the new process has never seen any."""
+        self._req_id = 0
+        self._buf.clear()
+        self._process = subprocess.Popen(self._command,
                                          stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL,
-                                         text=True,
-                                         bufsize=1,
-                                         env=popen_env,
-                                         cwd=cwd)
-        atexit.register(self.close)
+                                         env=self._popen_env,
+                                         cwd=self._cwd,
+                                         start_new_session=True)
         self._handshake()
+
+    def _ensure(self):
+        """a live server to talk to: respawn one killed by an interrupt (or
+        one that died on its own) before the next request."""
+        if self._process is None or self._process.poll() is not None:
+            log.info("MCP server %r: (re)starting", self.label)
+            self._spawn()
+
+    def _abort(self):
+        """stop the server mid-request: kill its process tree and forget it,
+        so _ensure respawns on the next call."""
+        process = self._process
+        self._process = None
+        self._buf.clear()
+        _kill_tree(process)
 
     def _handshake(self):
         params = {}
@@ -88,18 +142,52 @@ class LocalMCPServer:
         log.info("MCP server %r started", self.label)
 
     def _write(self, message):
-        self._process.stdin.write(json.dumps(message) + "\n")
+        self._process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
         self._process.stdin.flush()
 
-    def _notify(self, method):
+    def _notify(self, method, params=None):
         message = {}
         message["jsonrpc"] = "2.0"
         message["method"] = method
+        if params is not None:
+            message["params"] = params
         self._write(message)
 
-    def _request(self, method, params):
+    def _readline(self, interrupt):
+        """the next line of the server's stdout (bytes, newline stripped), ""
+        at EOF. reads the pipe in chunks through select so a set interrupt is
+        seen within _POLL_TICK even while the server is silent."""
+        fd = self._process.stdout.fileno()
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl >= 0:
+                line = bytes(self._buf[:nl])
+                del self._buf[:nl + 1]
+                return line
+            if _interrupted(interrupt):
+                raise ToolInterrupted()
+            ready, _, _ = select.select([fd], [], [], _POLL_TICK)
+            if fd not in ready: continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                if self._buf:
+                    line = bytes(self._buf)
+                    self._buf.clear()
+                    return line
+                return ""
+            self._buf.extend(chunk)
+
+    def _request(self, method, params, interrupt=None):
         """send one JSON-RPC request and return its response dict, skipping any
-        interleaved notification/log line until the matching id comes back."""
+        interleaved notification/log line until the matching id comes back.
+        with an interrupt Event, a set flag mid-wait kills the server (see the
+        class note) and raises ToolInterrupted."""
+        if _interrupted(interrupt):
+            # already set before the request went out (the rest of a batch
+            # after one call was abandoned): refuse without touching the
+            # server, so no spawn-and-kill per remaining call.
+            raise ToolInterrupted()
+        self._ensure()
         self._req_id += 1
         req_id = self._req_id
         message = {}
@@ -110,10 +198,15 @@ class LocalMCPServer:
         self._write(message)
 
         while True:
-            line = self._process.stdout.readline()
+            try:
+                line = self._readline(interrupt)
+            except ToolInterrupted:
+                log.info("MCP %r: %s %s interrupted, killing the server", self.label, method, req_id)
+                self._abort()
+                raise
             if line == "":
                 raise ConnectionError(f"MCP server {self.label!r} exited during {method!r}")
-            line = line.strip()
+            line = line.decode("utf-8", errors="replace").strip()
             if not line: continue
             try:
                 response = json.loads(line)
@@ -128,14 +221,36 @@ class LocalMCPServer:
         response = self._request("tools/list", {})
         return _tools_from_response(response)
 
-    def call_tool(self, name, arguments):
-        response = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+    def call_tool(self, name, arguments, interrupt=None):
+        response = self._request("tools/call", {"name": name, "arguments": arguments or {}},
+                                 interrupt=interrupt)
         return _text_from_response(response)
 
     def close(self):
-        if self._process is None: return
-        if self._process.poll() is not None: return
-        self._process.terminate()
+        process = self._process
+        self._process = None
+        _kill_tree(process)
+
+
+def _kill_tree(process):
+    """end a server and everything it spawned (it leads its own session, so
+    one killpg covers the tree): SIGTERM, a short grace, then SIGKILL. a
+    None or already-exited process is a no-op."""
+    if process is None: return
+    if process.poll() is not None: return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None: return
+        time.sleep(0.02)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
 
 
 class RemoteMCPServer:
@@ -182,13 +297,15 @@ class RemoteMCPServer:
             self._session_id = session_id
         return response
 
-    def _notify(self, method):
+    def _notify(self, method, params=None):
         message = {}
         message["jsonrpc"] = "2.0"
         message["method"] = method
+        if params is not None:
+            message["params"] = params
         self._post(message, False)
 
-    def _request(self, method, params):
+    def _request(self, method, params, interrupt=None):
         self._req_id += 1
         req_id = self._req_id
         message = {}
@@ -196,8 +313,37 @@ class RemoteMCPServer:
         message["id"] = req_id
         message["method"] = method
         message["params"] = params
-        response = self._post(message, True)
-        return self._read_reply(response, req_id)
+        if interrupt is None:
+            return self._read_reply(self._post(message, True), req_id)
+
+        # abandonable: the blocking POST + reply read run on a pump thread and
+        # this side polls the interrupt (cai.api's pattern). an abandoned pump
+        # finishes on its own and its reply is dropped; the server is told to
+        # stop with notifications/cancelled - a remote process is not ours to
+        # kill, unlike a stdio server's.
+        outcome = {}
+
+        def pump():
+            try:
+                outcome["reply"] = self._read_reply(self._post(message, True), req_id)
+            except BaseException as e:
+                outcome["error"] = e
+
+        thread = threading.Thread(target=pump, daemon=True, name=f"cai-mcp-{self.label}")
+        thread.start()
+        while thread.is_alive():
+            thread.join(_POLL_TICK)
+            if thread.is_alive() and _interrupted(interrupt):
+                log.info("MCP %r: %s %s interrupted, cancelling", self.label, method, req_id)
+                try:
+                    self._notify("notifications/cancelled",
+                                 {"requestId": req_id, "reason": "interrupted by user"})
+                except Exception:
+                    pass
+                raise ToolInterrupted()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["reply"]
 
     def _read_reply(self, response, req_id):
         """the JSON-RPC response dict matching req_id, from either a JSON body or
@@ -224,8 +370,9 @@ class RemoteMCPServer:
         response = self._request("tools/list", {})
         return _tools_from_response(response)
 
-    def call_tool(self, name, arguments):
-        response = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+    def call_tool(self, name, arguments, interrupt=None):
+        response = self._request("tools/call", {"name": name, "arguments": arguments or {}},
+                                 interrupt=interrupt)
         return _text_from_response(response)
 
     def close(self):
@@ -623,10 +770,18 @@ class ToolsRegistry:
         _kind, mcp_name, tool_name = entry
         try:
             server = self._load_server(mcp_name)
-            return server.call_tool(tool_name, arguments)
+            return server.call_tool(tool_name, arguments, interrupt=self._interrupt())
+        except ToolInterrupted:
+            return f"Error: tool '{name}' interrupted by user"
         except Exception as e:
             log.exception("tool %s failed", name)
             return f"Error: tool '{name}' failed: {e}"
+
+    def _interrupt(self):
+        """the run's interrupt Event, off the agent this registry serves - None
+        for a registry with no agent (or a stub without one), meaning a tool
+        call cannot be abandoned."""
+        return getattr(self.agent, "interrupt", None)
 
     def dispatch_selected(self, name, arguments):
         """run one tool by its exposed name, refusing any that isn't selected -

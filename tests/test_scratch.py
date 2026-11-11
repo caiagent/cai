@@ -113,8 +113,8 @@ def test_declared_env_wins_over_injected_scratch(tmp_path):
 
 _ECHO_SERVER = """
 import os
-from mcp.server.fastmcp import FastMCP
-mcp = FastMCP(name="echo")
+from mcp.server.mcpserver import MCPServer
+mcp = MCPServer(name="echo")
 
 @mcp.tool()
 def agent() -> str:

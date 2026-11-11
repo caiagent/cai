@@ -72,28 +72,53 @@ def test_unset_var_grants_nothing(tmp_path, monkeypatch):
         cai.safe_path("/etc/passwd")
 
 
-def test_publish_sets_env_from_comma_list(tmp_path, monkeypatch):
+def test_publish_sets_env_from_a_path_list(tmp_path, monkeypatch):
     one = tmp_path / "one"
     one.mkdir()
     two = tmp_path / "two.txt"
     two.write_text("a file entry works too")
     monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
-    assert cli._publish_allowed_paths(f"{one}, {two}") is True
+    assert cli._publish_allowed_paths([str(one), str(two)]) is True
     expected = os.pathsep.join([str(one), str(two)])
     assert os.environ["CAI_ALLOWED_PATHS"] == expected
+
+
+def test_publish_still_takes_the_comma_string_of_the_allow_command(tmp_path, monkeypatch):
+    one = tmp_path / "one"
+    one.mkdir()
+    two = tmp_path / "two.txt"
+    two.write_text("")
+    monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
+    assert cli._publish_allowed_paths(f"{one}, {two}") is True
+    assert os.environ["CAI_ALLOWED_PATHS"] == os.pathsep.join([str(one), str(two)])
+
+
+def test_flag_takes_several_space_separated_paths(tmp_path, monkeypatch):
+    """--allowed-paths a b -- prompt: nargs="+" like --skill, and '--' still
+    ends the list so the prompt is not swallowed."""
+    one = tmp_path / "one"
+    one.mkdir()
+    two = tmp_path / "two"
+    two.mkdir()
+    parser = cli.build_parser()
+    args = parser.parse_args(["--allowed-paths", str(one), str(two), "-p", "x"])
+    assert args.allowed_paths == [str(one), str(two)]
+    args = parser.parse_args(["--disallowed-paths", str(one), "--skill", "fs"])
+    assert args.disallowed_paths == [str(one)]
+    assert args.skill == ["fs"]
 
 
 def test_publish_resolves_relative_entries_against_cwd(tmp_path, monkeypatch):
     (tmp_path / "rel").mkdir()
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
-    assert cli._publish_allowed_paths("rel") is True
+    assert cli._publish_allowed_paths(["rel"]) is True
     assert os.environ["CAI_ALLOWED_PATHS"] == str(tmp_path / "rel")
 
 
 def test_publish_rejects_a_missing_entry(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("CAI_ALLOWED_PATHS", raising=False)
-    assert cli._publish_allowed_paths(str(tmp_path / "nope")) is False
+    assert cli._publish_allowed_paths([str(tmp_path / "nope")]) is False
     assert "CAI_ALLOWED_PATHS" not in os.environ
     assert "does not exist" in capsys.readouterr().err
 

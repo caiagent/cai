@@ -30,6 +30,7 @@ import logging
 import os
 import queue
 import select
+import sys
 import threading
 import time
 
@@ -1718,9 +1719,10 @@ def _running_subagents(client):
     return running
 
 
-def _status_lines(model, skills, tools, subagents, allowed, disallowed, user, steer):
+def _status_lines(model, cwd, skills, tools, subagents, allowed, disallowed, user, steer):
     """the status widget body: dim plain text, one heading per section and one
-    name per row beneath it; a section with nothing to list is left out (the
+    name per row beneath it (the agent's cwd right under the model, since the
+    fs sandbox and relative paths resolve against it); a section with nothing to list is left out (the
     path grants and denies included, so they only show once set). the pending
     counts fold in as one row each. rows are padded to one width so the block
     reads as a panel over the conversation."""
@@ -1730,6 +1732,9 @@ def _status_lines(model, skills, tools, subagents, allowed, disallowed, user, st
     if model:
         rows.append(("model", None))
         rows.append(("  " + model, ""))
+    if cwd:
+        rows.append(("cwd", None))
+        rows.append(("  " + cwd, ""))
     sections = []
     sections.append(("skills", skills))
     sections.append(("tools", tools))
@@ -1763,7 +1768,7 @@ def _status_lines(model, skills, tools, subagents, allowed, disallowed, user, st
 
 
 class _StatusWidget:
-    """the Tab-toggled 'status' hover widget: the agent's model, active skills
+    """the Tab-toggled 'status' hover widget: the agent's model and cwd, active skills
     and tools and path grants/denies (read over the wire), the live sub-agents
     (fed by the poll loop), and the pending counts. toggle() shows/hides it and paints at once; while
     visible the poll loop refreshes it every tick so :skills / :tools / a model
@@ -1801,7 +1806,9 @@ class _StatusWidget:
         the last painting in place rather than tearing the widget down."""
         if not self.visible: return
         try:
-            model = self._client.get_info().get("model", "")
+            info = self._client.get_info()
+            model = info.get("model", "")
+            cwd = info.get("cwd", "")
             skills = sorted(self._client.get_selected_skills())
             tools = sorted(self._client.get_selected_tools())
             paths = self._client.get_paths()
@@ -1812,7 +1819,7 @@ class _StatusWidget:
         with self._lock:
             subagents = list(self._subagents)
         user, steer = self._pending.counts()
-        lines = _status_lines(model, skills, tools, subagents, allowed, disallowed, user, steer)
+        lines = _status_lines(model, cwd, skills, tools, subagents, allowed, disallowed, user, steer)
         self._screen.add_widget("status", lines)
 
 
@@ -2247,7 +2254,13 @@ def run(*,
     threading.Thread(target=server.serve, daemon=True, name="cai-tui-serve").start()
     client = AgentClient(server.path)
 
-    screen = Screen()
+    try:
+        screen = Screen()
+    except OSError as e:
+        # no keyboard to drive the TUI from (-i forced on a run with neither a
+        # terminal on stdin nor a /dev/tty): say so instead of tracing back.
+        print(f"cai: {e.strerror or e}", file=sys.stderr)
+        return 1
     jobs = _Jobs()
     stop = threading.Event()
 

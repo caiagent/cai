@@ -363,6 +363,12 @@ class Agent:
         slot filler's latest state reach the next call."""
         return self.system_prompt
 
+    def get_cwd(self):
+        """the working directory the fs sandbox, the python jail and every
+        relative path resolve against (realpath'd, like safe_path does). a
+        process-wide value, as the path policy is, read live so a chdir shows."""
+        return os.path.realpath(os.getcwd())
+
     def get_paths(self):
         """the live path policy: the CAI_ALLOWED_PATHS grants and the
         CAI_DISALLOWED_PATHS denies, realpath'd."""

@@ -97,18 +97,19 @@ only the clean answer is printed. LLM knobs: `--model`, `--reasoning-effort`,
 `--temperature`, `--max-steps`, `--non-streaming`, `--cwd`. `--base-url` and
 `--api-key` override `config.json` / `~/.config/cai/api_key` for that run
 only — a one-off test of another provider without touching the config.
-`--allowed-paths p1,p2` grants tools access to files or directories beyond the
-working directory — a directory grants its subtree, a file just that file
+`--allowed-paths p1 p2` grants tools access to files or directories beyond the
+working directory — one or more paths, space-separated like `--skill` — a
+directory grants its subtree, a file just that file
 (published as `CAI_ALLOWED_PATHS`, which `cai.safe_path` and every spawned
 tool process honor; read-only inside the python-tool jail).
-`--disallowed-paths p1,p2` is the mirror image: files or directories tools may
+`--disallowed-paths p1 p2` is the mirror image: files or directories tools may
 never touch, even inside the working directory or a grant — a deny always
 wins (published as `CAI_DISALLOWED_PATHS`; the python-tool jail masks each
 one with an empty read-only mount, so spawned programs cannot see them
 either). Both lists can be changed mid-session: `:allow p1,p2` /
-`:disallow p1,p2` replace a list with the same syntax, bare `:allow` shows
-it, `:allow -` clears it — tool servers restart under the new policy between
-turns.
+`:disallow p1,p2` replace a list (comma-separated there, since a command
+takes one argument), bare `:allow` shows it, `:allow -` clears it — tool
+servers restart under the new policy between turns.
 
 Three stream modes ride the same flags:
 
@@ -154,6 +155,10 @@ cai --sessions      # pick a saved session to resume
 Sessions are saved as `.flow` files — a small JSON document holding the
 conversation plus the settings needed to resume it.
 
+The TUI reads keys from stdin whenever stdin is a terminal; `/dev/tty` is
+opened only behind a piped stdin (`git diff | cai -i`), so a sandbox that
+passes a pty on stdin but has no reachable `/dev/tty` still runs it.
+
 ## Skills, tools, sub-agents
 
 - **Function tools** are plain Python callables registered with `@cai.tool`.
@@ -163,7 +168,7 @@ conversation plus the settings needed to resume it.
   the agent's name as `CAI_AGENT` instead.
 - **MCP tools** come from MCP servers, named `<server>__<tool>` so two
   servers can each expose a `search` without colliding. `fs` ships built in.
-  A server is either a `mcps/*.py` FastMCP stdio script, or declared with
+  A server is either a `mcps/*.py` MCPServer stdio script (mcp >= 2), or declared with
   `cai.mcp_server` (see [Configuration](#initpy)) — local or remote.
 - **Skills** are markdown files: a small header (`tools:`, `skills:`) plus a
   prompt body. Activating one unions its tools into the registry and appends
@@ -349,4 +354,8 @@ make test           # pytest -q
 make clean
 ```
 
-Logs go to `/tmp/cai.log`.
+Logs go to `cai.log` under the platform temp dir (`tempfile.gettempdir()`, so
+`TMPDIR`/`TEMP`/`TMP` are honoured; `/tmp/cai.log` on a stock Linux). Set
+`CAI_LOG_FILE` to name the file outright. If the target cannot be opened,
+logging falls back to stderr instead of failing the import. The resolved
+path is `cai.LOG_FILE`.

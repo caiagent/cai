@@ -105,7 +105,8 @@ def _agent_completer(prefix, **kwargs):
 
 
 def _path_completer(prefix, **kwargs):
-    """filesystem-path completer for `cai extend <source>`."""
+    """filesystem-path completer for `cai extend <source>` and the
+    --allowed-paths / --disallowed-paths flags."""
     directory = os.path.dirname(prefix) or "."
     matching = []
     try:
@@ -244,16 +245,22 @@ def build_parser():
                         metavar="DIR",
                         help="run from this directory, so --file, tools and the LLM "
                              "see paths relative to it")
-    parser.add_argument("--allowed-paths",
-                        default=None,
-                        metavar="PATH,...",
-                        help="extra files or directories (comma-separated) tools may "
-                             "access beyond the working directory")
-    parser.add_argument("--disallowed-paths",
-                        default=None,
-                        metavar="PATH,...",
-                        help="files or directories (comma-separated) tools may never "
-                             "access, even inside the working directory")
+    allowed_arg = parser.add_argument("--allowed-paths",
+                                      nargs="+",
+                                      default=None,
+                                      metavar="PATH",
+                                      help="extra files or directories (one or more) "
+                                           "tools may access beyond the working "
+                                           "directory")
+    allowed_arg.completer = _path_completer
+    disallowed_arg = parser.add_argument("--disallowed-paths",
+                                         nargs="+",
+                                         default=None,
+                                         metavar="PATH",
+                                         help="files or directories (one or more) tools "
+                                              "may never access, even inside the "
+                                              "working directory")
+    disallowed_arg.completer = _path_completer
     parser.add_argument("--model",
                         default=None,
                         help="model id (default: the `model` field in config.json)")
@@ -628,7 +635,8 @@ def _drive(run, show_reasoning=True):
 
 def _publish_paths(flag, var, spec):
     """export a path flag's entries under its env var via cai.paths.publish;
-    False (with the reason on stderr) when an entry does not exist."""
+    False (with the reason on stderr) when an entry does not exist. `spec` is
+    the flag's list of paths (nargs="+"), or a comma-separated string."""
     from cai import paths
     try:
         paths.publish(var, spec)

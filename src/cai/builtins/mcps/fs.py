@@ -1,6 +1,6 @@
 """fs.py - the built-in file-system MCP server, shipped with cai.
 
-A FastMCP stdio server (stdlib + cai.safe_path). Its tools are surfaced
+An MCPServer stdio server (mcp >= 2, stdlib + cai.safe_path). Its tools are surfaced
 prefixed with the file name: ``fs__search``, ``fs__read_file``,
 ``fs__list_files`` (read-only), and ``fs__create_file``, ``fs__edit_file``,
 ``fs__rename_file``, ``fs__move_file``, ``fs__copy_file``, ``fs__copy_bytes``,
@@ -29,11 +29,11 @@ import time
 from collections import deque
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from cai import safe_path
 
-mcp = FastMCP(name="fs")
+mcp = MCPServer(name="fs")
 
 
 def _is_binary(safe):

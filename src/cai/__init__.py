@@ -14,18 +14,43 @@ Entry:   cai.config      - bootstrap settings (API key, OpenRouter endpoint).
          cai.cli         - the `cai` command: prompt in, streamed answer out.
 """
 import logging
+import os
+import sys
+import tempfile
 from typing import TYPE_CHECKING
+
+
+def _log_file():
+    """where cai's diagnostics land: CAI_LOG_FILE names the file outright
+    (alongside the other CAI_* vars); otherwise cai.log under the platform
+    temp dir, so TMPDIR/TEMP/TMP are honoured and /tmp is the fallback rather
+    than the requirement (it is absent or unwritable on Termux, in sandboxes
+    that relocate temp, or behind a stale root-owned cai.log)."""
+    named = os.environ.get("CAI_LOG_FILE")
+    if named:
+        return os.path.abspath(named)
+    return os.path.join(tempfile.gettempdir(), "cai.log")
+
 
 # every module logs through getLogger("cai"); point that logger (never the
 # root) at a file so the diagnostics land somewhere readable without touching
 # a host app's logging - its records don't leak in, cai's don't leak out.
+# an unwritable target degrades to stderr instead of breaking the import.
+LOG_FILE = _log_file()
 _log = logging.getLogger("cai")
 if not _log.handlers:
-    _handler = logging.FileHandler("/tmp/cai.log")
+    _error = None
+    try:
+        _handler = logging.FileHandler(LOG_FILE)
+    except OSError as e:
+        _error = e
+        _handler = logging.StreamHandler(sys.stderr)
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     _log.addHandler(_handler)
     _log.setLevel(logging.INFO)
     _log.propagate = False
+    if _error is not None:
+        _log.warning("cannot open log file %s (%s); logging to stderr", LOG_FILE, _error)
 
 from cai.paths import safe_path, scratch_dir
 from cai.ui import current_ui
@@ -51,6 +76,7 @@ if TYPE_CHECKING:
     settings: Settings
 
 __all__ = [
+    "LOG_FILE",
     "safe_path",
     "scratch_dir",
     "current_ui",

@@ -79,13 +79,13 @@ def test_unset_var_denies_nothing(tmp_path, monkeypatch):
     assert cai.safe_path("anything") == str(tmp_path / "anything")
 
 
-def test_publish_sets_env_from_comma_list(tmp_path, monkeypatch):
+def test_publish_sets_env_from_a_path_list(tmp_path, monkeypatch):
     one = tmp_path / "one"
     one.mkdir()
     two = tmp_path / "two.txt"
     two.write_text("a file entry works too")
     monkeypatch.delenv("CAI_DISALLOWED_PATHS", raising=False)
-    assert cli._publish_disallowed_paths(f"{one}, {two}") is True
+    assert cli._publish_disallowed_paths([str(one), str(two)]) is True
     expected = os.pathsep.join([str(one), str(two)])
     assert os.environ["CAI_DISALLOWED_PATHS"] == expected
 
@@ -94,13 +94,13 @@ def test_publish_resolves_relative_entries_against_cwd(tmp_path, monkeypatch):
     (tmp_path / "rel").mkdir()
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CAI_DISALLOWED_PATHS", raising=False)
-    assert cli._publish_disallowed_paths("rel") is True
+    assert cli._publish_disallowed_paths(["rel"]) is True
     assert os.environ["CAI_DISALLOWED_PATHS"] == str(tmp_path / "rel")
 
 
 def test_publish_rejects_a_missing_entry(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("CAI_DISALLOWED_PATHS", raising=False)
-    assert cli._publish_disallowed_paths(str(tmp_path / "nope")) is False
+    assert cli._publish_disallowed_paths([str(tmp_path / "nope")]) is False
     assert "CAI_DISALLOWED_PATHS" not in os.environ
     assert "--disallowed-paths entry does not exist" in capsys.readouterr().err
 
