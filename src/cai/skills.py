@@ -209,6 +209,19 @@ class SkillsRegistry:
         through set_skills."""
         return list(self._names)
 
+    def tools_by_skill(self):
+        """{skill name: [the tools its header declares]} for the active
+        skills, in activation order. a name that resolved to no file maps
+        to an empty list."""
+        grouped = {}
+        for name in self._names:
+            skill = self._skills.get(name)
+            if skill is None:
+                grouped[name] = []
+                continue
+            grouped[name] = list(skill.tools)
+        return grouped
+
     def add(self, name):
         """activate a skill (and, first, the skills it builds on), unioning its
         tools into the tool registry. an already-active name is a no-op."""

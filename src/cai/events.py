@@ -32,6 +32,8 @@ class Event:
     that don't apply to the event's type are left at their defaults.
 
       content     - text
+      user        - text / origin (None when the user wrote it; else who
+                    did - see cai.origin - e.g. a sub-agent's report)
       reasoning   - text
       tool_call   - tool_name / tool_args / tool_call_id
       tool_result - tool_name / tool_result / tool_call_id / is_error
@@ -45,3 +47,4 @@ class Event:
     tool_result: Optional[str] = None
     is_error: bool = False
     usage: Optional[dict] = None
+    origin: Optional[str] = None

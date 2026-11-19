@@ -68,3 +68,37 @@ def test_bad_entry_is_reported_and_changes_nothing():
     _paths_command(screen, client, "allow", "/nope")
     assert screen.out == ["[:allow entry does not exist: '/nope']\n"]
     assert client.allowed == []
+
+
+# --- :pwd -------------------------------------------------------------------
+
+class InfoClient:
+    def __init__(self, info):
+        self.info = info
+
+    def get_info(self):
+        if self.info is None:
+            raise OSError("agent gone")
+        return self.info
+
+
+def test_pwd_prints_the_agents_cwd():
+    from cai.tui import _pwd_command
+    screen = FakeScreen()
+    _pwd_command(screen, InfoClient({"cwd": "/srv/work"}))
+    assert screen.out == ["[/srv/work]\n"]
+
+
+def test_pwd_reports_a_wire_failure():
+    from cai.tui import _pwd_command
+    screen = FakeScreen()
+    _pwd_command(screen, InfoClient(None))
+    assert screen.out == ["[:pwd agent gone]\n"]
+
+
+def test_pwd_is_in_the_palette():
+    from cai import tui
+    names = []
+    for name, _help in tui._PALETTE_COMMANDS:
+        names.append(name)
+    assert "pwd" in names

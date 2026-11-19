@@ -319,6 +319,11 @@ class Agent:
         """the active skill names - what set_selected_skills controls."""
         return self.skills
 
+    def get_skill_tools(self):
+        """{active skill: [the tools it declares]} - which skill brought which
+        tools, for views that group them (the TUI's status panel)."""
+        return self.skills_registry.tools_by_skill()
+
     def get_available_skills(self):
         """every skill the agent could activate: the env's catalogue plus the
         ones already active on this agent."""
@@ -595,9 +600,12 @@ class Agent:
     def killed(self):
         return self._killed.is_set()
 
-    def steer(self, text, run_on_idle=True):
+    def steer(self, text, run_on_idle=True, origin=None):
         """queue `text` for the conversation; return whether its delivery is
-        arranged here.
+        arranged here. `origin` (see cai.origin) names who wrote the text when
+        it was not the user - it is stored on the folded-in message as
+        `_origin`, so the model reads it enveloped and the views tell it from
+        a prompt.
 
         the text always goes onto the steer queue - the one path a steer takes
         into the conversation. call_llm drains the queue at every turn boundary
@@ -619,7 +627,7 @@ class Agent:
         ends is delivered by that run. best effort: a text pushed in the sliver
         between that last drain and the run winding down stays queued for the
         next run's first turn boundary. safe to call from any thread."""
-        self._steer.push(text)
+        self._steer.push(text, origin)
         if self._run_lock.locked():
             return True
         if not run_on_idle:
@@ -696,7 +704,7 @@ class Agent:
                                     hooks=hooks_registry,
                                     ui=self._ui,
                                     interrupt=self.interrupt,
-                                    steer=self._steer.drain,
+                                    steer=self._steer.drain_entries,
                                     reasoning_effort=self.reasoning_effort,
                                     temperature=0,
                                     max_steps=self.max_steps,
@@ -718,7 +726,7 @@ class Agent:
                                   hooks=hooks_registry,
                                   ui=self._ui,
                                   interrupt=self.interrupt,
-                                  steer=self._steer.drain,
+                                  steer=self._steer.drain_entries,
                                   reasoning_effort=self.reasoning_effort,
                                   temperature=self.temperature,
                                   max_steps=self.max_steps,

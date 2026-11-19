@@ -14,7 +14,7 @@ import termios
 import tty
 
 from ..ansi import (
-    ALT_ENTER, ALT_EXIT,
+    ALT_ENTER,
     CUR_SHOW, CUR_HIDE,
     ERASE_SCREEN,
     SGR_RESET, SGR_REVERSE, SGR_DIM_GRAY, SGR_BOLD_AZURE,
@@ -275,7 +275,10 @@ def prompt_palette_overlay(screen, commands):
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
-        sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
+        # stay in the alternate screen: the main TUI lives there too, so
+        # leaving it would flash the terminal's primary buffer (the shell's
+        # scrollback) until the screen's restore repaints the session.
+        sys.stdout.write(CUR_HIDE)
         sys.stdout.flush()
 
     return result

@@ -139,9 +139,11 @@ carries its own reference.
 `cai` with no prompt (and a terminal attached) opens the full-screen
 interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
 session: `:models`, `:messages`, `:history`, `:sessions`, `:save`, `:load`,
-`:tools`, `:skills`, `:status` (Tab: toggle a status panel over the
-conversation - model, active skills and tools, live sub-agents, pending
-counts - kept current while shown), `:pending` (Ctrl-Q: the steers and queued prompts
+`:tools`, `:skills`, `:pwd` (print the agent's working directory),
+`:status` (Tab: toggle a framed status window in the middle of the
+conversation - model, working directory, active skills and tools, live
+sub-agents, path grants, pending counts - kept current while shown),
+`:pending` (Ctrl-Q: the steers and queued prompts
 waiting behind the running turn - Ctrl-K removes one before it runs; opens
 only when something is pending), `:redraw` (repaint the view from the
 conversation, e.g. after flipping *show reasoning* in `:config`).
@@ -183,7 +185,11 @@ passes a pty on stdin but has no reachable `/dev/tty` still runs it.
   caching. See `examples/extensions/memory` for the pattern.
 - The `subagents` skill gives the agent launch / wait / list / kill tools;
   each child runs on its own unix socket with a reduce-only subset of the
-  parent's tools.
+  parent's tools. A finished child's answer is steered into the parent as a
+  `user` message carrying a local `_origin` key (`"subagent:<name>"`): the
+  key never reaches the provider - the model reads the content wrapped in a
+  `[sub-agent report]` envelope instead - while the TUI, `--tail`, and your
+  hooks (`cai.origin_of(message)`) can tell a report from a prompt you typed.
 - The `python-read-only` skill gives the agent a `python(code, timeout=60)` tool that
   runs a snippet in a subprocess of a cai-managed virtualenv
   (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only;

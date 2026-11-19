@@ -14,7 +14,7 @@ remote agent:
   agent  -> client  CONTROL_RESULT {ok, value, error}   the op's answer
   agent  -> client  PROMPT  {id, kind, ...}   a UI prompt a hook raised
   client -> agent   REPLY   {id, value}   the human's answer to a PROMPT
-  client -> agent   STEER   {text}        fold a message into the running turn
+  client -> agent   STEER   {text, origin?}   fold a message into the running turn
   client -> agent   INTERRUPT             abort the in-flight run
 
   w = Wire(channel)
@@ -26,8 +26,8 @@ remote agent:
   w.answer(msg, ui)                   # client side: answer a PROMPT via a local UI
 
 The control ops are get_info, get_messages/set_messages, set_model,
-get_selected_skills/get_available_skills/set_selected_skills, and the matching
-tools trio. PROMPT carries a UI request (confirm/select/text, or a
+get_selected_skills/get_available_skills/set_selected_skills, get_skill_tools
+(which active skill declares which tools), and the matching tools trio. PROMPT carries a UI request (confirm/select/text, or a
 one-way notify) that a hook raised mid-run via HookContext.ui; the client
 answers with a REPLY (none for notify). Everything is synchronous: the agent
 handles one message fully before the next, and a blocked prompt reads the
@@ -91,10 +91,15 @@ class Wire:
         msg["text"] = text
         self.send(msg)
 
-    def send_steer(self, text):
+    def send_steer(self, text, origin=None):
+        """steer `text` into the agent. `origin` (see cai.origin) marks text
+        the sender did not get from its user - a sub-agent's report; left out
+        of the message when None, the plain user steer."""
         msg = {}
         msg["type"] = self.STEER
         msg["text"] = text
+        if origin is not None:
+            msg["origin"] = origin
         self.send(msg)
 
     def send_interrupt(self):
@@ -281,6 +286,7 @@ class Wire:
         out["tool_result"] = event.tool_result
         out["is_error"] = event.is_error
         out["usage"] = event.usage
+        out["origin"] = event.origin
         return out
 
     @staticmethod
@@ -294,4 +300,5 @@ class Wire:
         event.tool_result = data.get("tool_result")
         event.is_error = data.get("is_error", False)
         event.usage = data.get("usage")
+        event.origin = data.get("origin")
         return event

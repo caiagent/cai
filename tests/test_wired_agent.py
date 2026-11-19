@@ -291,6 +291,13 @@ def test_control_set_then_get_messages(serve):
     assert messages == seed
 
 
+def test_control_get_skill_tools_empty(serve):
+    wire = serve(make_agent())
+    ok, grouped, error = wire.control("get_skill_tools")
+    assert ok is True
+    assert grouped == {}
+
+
 def test_control_get_selected_skills_empty(serve):
     wire = serve(make_agent())
     ok, skills, error = wire.control("get_selected_skills")
@@ -990,8 +997,8 @@ def test_steer_over_wire_folds_in_mid_run(serve):
     agent = make_agent(tools=[slow_tool], api=api)
     # signal once the reader applies the steer, so the tool releases deterministically
     inner_steer = agent.steer
-    def steer_and_signal(text, run_on_idle=True):
-        handled = inner_steer(text, run_on_idle=run_on_idle)
+    def steer_and_signal(text, run_on_idle=True, origin=None):
+        handled = inner_steer(text, run_on_idle=run_on_idle, origin=origin)
         applied.set()
         return handled
     agent.steer = steer_and_signal
@@ -1159,3 +1166,23 @@ def test_control_set_paths_missing_entry_fails_cleanly(serve, tmp_path, monkeypa
     assert "does not exist" in error
     ok, value, error = wire.control("get_paths")
     assert value == {"allowed": [], "disallowed": []}
+
+
+def test_steer_origin_over_wire_tags_the_stored_message(serve):
+    # a STEER carrying an origin (a sub-agent's report) lands as a user turn
+    # with `_origin`, and its broadcast USER event names the origin - a plain
+    # steer leaves both unset.
+    agent = make_agent(api=FakeApi(chunks=["reacted"]))
+    wire = serve(agent)
+    wire.send_steer("the findings", origin="subagent:c1")
+    origins = []
+    done = False
+    while not done:
+        for msg in wire.recv():
+            if msg["type"] == Wire.EVENT and msg["event"]["type"] == "user":
+                origins.append(msg["event"].get("origin"))
+            if msg["type"] == Wire.RESULT:
+                done = True
+    assert origins == ["subagent:c1"]
+    ok, messages, error = wire.control("get_messages")
+    assert {"role": "user", "content": "the findings", "_origin": "subagent:c1"} in messages

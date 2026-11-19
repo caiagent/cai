@@ -290,7 +290,7 @@ class ModeHandler:
             if shortcut is not None:
                 raise CommandException(shortcut)
 
-        # Tab: toggle the status widget (model, skills, tools, sub-agents).
+        # Tab: toggle the status panel (model, cwd, skills, tools, sub-agents).
         # Inert while a live ask element owns the keys (a confirm's yes/no
         # toggles on Tab) and while typing a ':' command (completion) or a search.
         if key == KEY_TAB and state.mode in (Mode.NORMAL, Mode.INSERT):

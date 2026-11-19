@@ -6,6 +6,8 @@ import logging
 import warnings
 import threading
 import requests
+
+from cai.origin import envelope, origin_of
 from urllib.parse import urlsplit, urlunsplit
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -60,7 +62,10 @@ def _price_per_mtok(value):
 def _wire_messages(messages):
     """strip local-only ("_"-prefixed) keys before a message goes on the
     wire - some strict providers reject unknown message fields. the single
-    choke point every request passes through."""
+    choke point every request passes through. a message carrying `_origin`
+    (text the harness injected, not the user's - see cai.origin) goes out with
+    its content wrapped in that origin's envelope; the stored message is left
+    untouched."""
     cleaned = []
     for message in messages:
         if not isinstance(message, dict):
@@ -80,6 +85,9 @@ def _wire_messages(messages):
         for key, value in message.items():
             if key.startswith('_'): continue
             wire_message[key] = value
+        origin = origin_of(message)
+        if origin is not None and 'content' in wire_message:
+            wire_message['content'] = envelope(origin, wire_message['content'])
         cleaned.append(wire_message)
     return cleaned
 

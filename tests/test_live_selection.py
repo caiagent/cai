@@ -234,6 +234,7 @@ def test_a_skill_brings_its_body_and_only_its_tools(tmp_path):
     agent = make_agent(tmp_path, api, skills=["reader"])
     assert agent.get_selected_skills() == ["reader"]
     assert agent.get_selected_tools() == ["alpha"]
+    assert agent.get_skill_tools() == {"reader": ["alpha"]}
     run(agent)
     assert "READER BODY" in api.system(0)
     assert "WRITER BODY" not in api.system(0)

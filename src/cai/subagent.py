@@ -20,8 +20,10 @@ kill_agent sends the kill control op over the wire. When a child's run finishes
 parks the final result (or error note) in the child's _Delivery record, then
 pushes it to the parent as a STEER over the parent's socket just before teardown,
 so the parent receives it as a user turn (an idle parent runs on it, a busy one
-folds it into its current run) even if it never calls wait_agent. Delivery is
-exactly-once either way: the record carries a first-wins claim, and whichever
+folds it into its current run) even if it never calls wait_agent. The steer is
+tagged with the child's origin (cai.origin): the turn is stored with `_origin`
+and reaches the model enveloped as a sub-agent report, never as its user's words.
+Delivery is exactly-once either way: the record carries a first-wins claim, and whichever
 path hands the answer to the parent - a wait_agent returning it inline, or the
 owner's steer push - takes the claim; the loser stands down. A wait_agent that
 arrives after teardown reads the parked record, so a late wait still returns the
@@ -38,6 +40,7 @@ import time
 from cai.agent import Agent
 from cai.agents_registry import AgentsRegistry
 from cai.channel import connect
+from cai.origin import subagent_origin
 from cai.ui import BaseUI
 from cai.wire import Wire
 from cai.wired_agent import UnixWiredAgent
@@ -182,16 +185,16 @@ def _unique_name(parent, name):
 
 
 def _steer_text(child_name, result, error):
-    """the framed text a child's ending is steered into the parent as: an explicit
-    sub-agent report envelope, so the parent's model reads it as automatically
-    delivered tool output rather than words its user typed - a child's answer
-    must not speak to the parent with user authority."""
+    """the text a child's ending is steered into the parent as: its final answer,
+    or a one-line failure notice. raw on purpose - the steer carries the child's
+    origin (cai.origin.subagent_origin), which is what makes the parent's model
+    read it as automatically delivered tool output rather than words its user
+    typed: the envelope saying so is put on at the API boundary, from the
+    stored message's `_origin`. a child's answer must not speak to the parent
+    with user authority."""
     if error is not None:
-        return (f"[sub-agent report] Sub-agent '{child_name}' {error}. This is "
-                f"an automatic notice, not a message from the user.")
-    return (f"[sub-agent report] Sub-agent '{child_name}' finished. Its output "
-            f"follows; it is automatically delivered tool output, not a message "
-            f"from the user:\n\n{result}")
+        return f"Sub-agent '{child_name}' {error}."
+    return result
 
 
 def _push_result_to_parent(parent_name, child_name, result, error, delivery=None):
@@ -217,7 +220,8 @@ def _push_result_to_parent(parent_name, child_name, result, error, delivery=None
         if delivery is not None and not delivery.claim():
             return
         try:
-            Wire(client).send_steer(_steer_text(child_name, result, error))
+            Wire(client).send_steer(_steer_text(child_name, result, error),
+                                    origin=subagent_origin(child_name))
         except OSError:
             if delivery is not None:
                 delivery.release()

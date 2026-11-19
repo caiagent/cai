@@ -303,7 +303,8 @@ def test_push_is_skipped_when_the_result_was_already_delivered():
         _push_result_to_parent(parent.name, "c1", "the result", None, delivery)
         time.sleep(0.3)                       # give any (erroneous) steered turn time to land
         for m in list(parent.messages):
-            assert "Sub-agent 'c1' finished" not in (m.get("content") or "")
+            assert m.get("_origin") is None
+            assert "the result" not in (m.get("content") or "")
     finally:
         served.close()
         parent.close()
@@ -431,13 +432,15 @@ def test_child_result_steers_an_idle_served_parent():
         while time.monotonic() < deadline:
             for m in list(parent.messages):
                 content = m.get("content") or ""
-                if m.get("role") == "user" and "c1" in content and "child output" in content:
+                if m.get("role") == "user" and m.get("_origin") == "subagent:c1":
                     landed = content
                     break
             if landed is not None:
                 break
             time.sleep(0.02)
-        assert landed is not None         # the child's result reached the parent as a user turn
+        # the child's result reached the parent as a user turn: stored raw,
+        # its provenance on `_origin` (the envelope is put on at the API).
+        assert landed == "child output"
     finally:
         served.close()
         parent.close()

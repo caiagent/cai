@@ -32,6 +32,7 @@ from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, RunGate, ToolCall
 from cai.hooks import current_model, current_system_prompt, current_tools
 from cai.hooks import reset_gate, set_gate, veto_message
+from cai.origin import ORIGIN_KEY
 from cai.ui import NULL_UI, reset_ui, set_ui
 
 
@@ -65,48 +66,79 @@ def _interrupted(interrupt):
 class SteerQueue:
     """thread-safe queue of steering messages: push() from any thread, drain()
     returns and clears them. call_llm drains it at each turn boundary (via the
-    steer= callable) and folds the messages in as user turns."""
+    steer= callable) and folds the messages in as user turns.
+
+    each entry is a (text, origin) pair: origin is None for the user's own
+    steer, else who wrote the text (see cai.origin). drain_entries() hands the
+    pairs to the loop; drain() / snapshot() / remove() speak plain texts."""
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._messages = []
+        self._entries = []
 
-    def push(self, text):
+    def push(self, text, origin=None):
         with self._lock:
-            self._messages.append(text)
+            self._entries.append((text, origin))
+
+    def drain_entries(self):
+        """return and clear the queued (text, origin) pairs, in order."""
+        with self._lock:
+            entries = self._entries
+            self._entries = []
+        return entries
 
     def drain(self):
-        with self._lock:
-            messages = self._messages
-            self._messages = []
-        return messages
+        """return and clear the queued texts, in order (origins dropped)."""
+        texts = []
+        for text, _origin in self.drain_entries():
+            texts.append(text)
+        return texts
 
     def pending(self):
         """whether any steered texts are queued (a drain would return some)."""
         with self._lock:
-            return len(self._messages) > 0
+            return len(self._entries) > 0
 
     def count(self):
         """how many steered texts are queued (0 when a drain would return none)."""
         with self._lock:
-            return len(self._messages)
+            return len(self._entries)
 
     def snapshot(self):
         """the queued texts in delivery order (a copy) - what a UI lists."""
         with self._lock:
-            return list(self._messages)
+            texts = []
+            for text, _origin in self._entries:
+                texts.append(text)
+            return texts
 
     def remove(self, index, text):
         """drop the queued text at `index`, but only if it still reads `text`:
         a drain (or another removal) racing the UI shifts the list, and then
         the stale index must not take a neighbour. returns whether it did."""
         with self._lock:
-            if index < 0 or index >= len(self._messages):
+            if index < 0 or index >= len(self._entries):
                 return False
-            if self._messages[index] != text:
+            if self._entries[index][0] != text:
                 return False
-            del self._messages[index]
+            del self._entries[index]
             return True
+
+
+def _fold_steered(messages, entry):
+    """append one drained steer to the conversation as a user turn and return
+    the USER event announcing it. `entry` is what a steer= callable yields: a
+    plain text (the user's own steer), or a (text, origin) pair - a non-None
+    origin is stored as the message's `_origin` and carried on the event."""
+    text = entry
+    origin = None
+    if isinstance(entry, (tuple, list)):
+        text, origin = entry
+    message = {"role": "user", "content": text}
+    if origin is not None:
+        message[ORIGIN_KEY] = origin
+    messages.append(message)
+    return Event(type=EventType.USER, text=text, origin=origin)
 
 
 def _parse_args(arguments):
@@ -446,7 +478,8 @@ def call_llm(messages,
     ui         - a UI for hooks to prompt the human, or None for NULL_UI.
     interrupt  - a threading.Event; when set the loop winds down at the next
                  safe boundary and returns the partial text. None = no kill.
-    steer      - callable() -> list of pending steering texts; drained at each
+    steer      - callable() -> list of pending steers, each a text or a
+                 (text, origin) pair (see cai.origin); drained at each
                  turn boundary and folded in as user turns. a would-be final
                  answer with steers pending is not final: they fold in and the
                  loop re-enters, so a steer lands at the closest boundary
@@ -474,9 +507,8 @@ def call_llm(messages,
             return content
 
         if steer is not None:
-            for text in steer():
-                messages.append({"role": "user", "content": text})
-                yield Event(type=EventType.USER, text=text)
+            for entry in steer():
+                yield _fold_steered(messages, entry)
 
         # before_turn: the observer's chance ahead of every model call - route
         # the model (agent.set_model), shrink the conversation - with the last
@@ -537,9 +569,8 @@ def call_llm(messages,
                     if reasoning:
                         assistant_msg['_reasoning'] = reasoning
                     messages.append(assistant_msg)
-                    for text in steered:
-                        messages.append({"role": "user", "content": text})
-                        yield Event(type=EventType.USER, text=text)
+                    for entry in steered:
+                        yield _fold_steered(messages, entry)
                     continue
             return _finish(messages, model, hooks, config, ui, usage, hooks_data,
                            content, reasoning)

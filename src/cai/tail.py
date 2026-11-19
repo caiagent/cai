@@ -22,6 +22,7 @@ import sys
 
 from cai.agents_registry import AgentsRegistry
 from cai.events import EventType
+from cai.origin import origin_label, origin_of
 from cai.wire import Wire
 
 
@@ -120,9 +121,19 @@ class _Printer:
         self.out.flush()
         self.out.flush()
 
+    def user_turn(self, text, origin):
+        """a user-role turn: the user's own as a '> ' prompt, one the harness
+        injected (a sub-agent's report - see cai.origin) under a dim header
+        naming who wrote it."""
+        if origin is None:
+            self.line(f"> {text}", dim=False)
+            return
+        self.line(f"[report from {origin_label(origin)}]")
+        self.line(text, dim=False)
+
     def event(self, event):
         if event.type == EventType.USER:
-            self.line(f"> {event.text or ''}", dim=False)
+            self.user_turn(event.text or "", getattr(event, "origin", None))
             return
         if event.type == EventType.CONTENT:
             self.stream(event.text or "")
@@ -154,7 +165,7 @@ def _replay(printer, messages):
         if not isinstance(content, str):
             content = str(content)
         if role == "user":
-            printer.line(f"> {content}", dim=False)
+            printer.user_turn(content, origin_of(message))
             continue
         if role == "tool":
             name = call_names.get(message.get("tool_call_id"), "?")

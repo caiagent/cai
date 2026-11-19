@@ -7,6 +7,24 @@ terminal text, live as the answer streams.
 
 - **`markdown`** — a renderer for the `response` kind (the assistant's messages).
 
+## Optional libraries
+
+The bundle loads with none of these and still renders; each one it finds in
+cai's own Python environment upgrades a part of it:
+
+| library | what it adds | without it |
+|---|---|---|
+| `markdown-it-py` | a CommonMark parser: nested emphasis, nested lists and quotes, code blocks inside list items, aligned tables measured on the rendered cells | a line-by-line regex pass over the same constructs |
+| `pygments` | syntax highlighting of fenced code, by the language on the fence | code in a single color |
+
+```sh
+pip install markdown-it-py pygments      # into the environment cai runs from
+# or, from a checkout:  pip install '.[markdown]'
+```
+
+They must be importable by cai itself — a renderer runs inside the TUI
+process, not in the python tool's sandboxed virtualenv.
+
 ## Layout
 
 ```
@@ -60,8 +78,14 @@ block in it.
 
 ## Notes
 
-- It runs on every chunk, so keep a renderer linear in the block size; this
-  one is a single pass over the lines.
+- It runs on every chunk, so keep a renderer linear in the block size: this
+  one re-parses the whole message each time (a few milliseconds for a few
+  kilobytes) and caches the colored lines of each code block, so only the
+  block still streaming is highlighted again.
+- A fence's language is whatever Pygments knows it as (`python`, `py`, `sh`,
+  `js`, `diff`, …); an unknown label keeps the single code color.
+- Setext headings (`text` over `---`) are turned off: a model writes `#`
+  headings, and a `---` under a line is rendered as a rule.
 - `:redraw` and a loaded session paint through the same renderer, each block
   final.
 - Resizing the terminal rewraps the rendered lines but does not re-render, so

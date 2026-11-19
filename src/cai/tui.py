@@ -37,6 +37,7 @@ import time
 from cai import usage
 from cai.channel import connect
 from cai.commands import CommandContext
+from cai.origin import origin_label, origin_of
 from cai.environment import Environment, Settings
 from cai.events import EventType
 from cai.renderers import RenderContext, render
@@ -46,6 +47,7 @@ from cai.screen.buffer import ContentBuffer
 from cai.screen.render import render_tool_call
 from cai.screen.overlays import config as overlay_config
 from cai.screen.overlays.config import Setting
+from cai import sessions_index
 from cai.session import SessionsRegistry
 from cai.ui import BaseUI, reset_ui, set_ui
 from cai.wire import Wire
@@ -68,11 +70,12 @@ _PALETTE_COMMANDS = [
     ("prompts", "fuzzy-search your prompt history"),
     ("continue", "continue the conversation without a new prompt"),
     ("agents", "live view of sub-agents"),
-    ("status", "toggle the status widget (Tab): model, skills, tools, sub-agents"),
+    ("status", "toggle the status panel (Tab): model, cwd, skills, tools, sub-agents"),
     ("pending", "remove queued prompts / steers before they run"),
     ("system", "view / edit the system prompt"),
     ("sessions", "load a saved session"),
     ("config", "edit the live session settings"),
+    ("pwd", "print the agent's current working directory"),
     ("allow", "grant tools extra paths: comma list replaces, bare shows, '-' clears"),
     ("disallow", "deny tools paths everywhere: comma list replaces, bare shows, '-' clears"),
     ("save", "save the session (optional path)"),
@@ -158,7 +161,7 @@ class _Transcript:
             self._stream(event.text or "", "reasoning", Screen.REASONING)
             return
         if event.type == EventType.USER:
-            self.note(f"> {(event.text or '').rstrip()}\n", Screen.USER)
+            self._user_turn((event.text or "").rstrip(), getattr(event, "origin", None))
             return
         if event.type == EventType.TOOL_CALL:
             header, block = render_tool_call(event.tool_name, event.tool_args)
@@ -233,6 +236,15 @@ class _Transcript:
         self.close()
         self._streaming = None
 
+    def _user_turn(self, text, origin):
+        """paint a user-role turn: the user's own as a '> ' prompt; one the
+        harness injected (a sub-agent's report - see cai.origin) as a meta
+        block headed by who wrote it, so it never reads as something typed."""
+        if origin is None:
+            self.note(f"> {text}\n", Screen.USER)
+            return
+        self.note(f"[report from {origin_label(origin)}]\n{text}\n", Screen.META)
+
     def note(self, text, kind):
         """write a self-contained block (a prompt, a tool line, a notice),
         always separated from what precedes it by one blank line."""
@@ -256,7 +268,7 @@ class _Transcript:
             if not isinstance(content, str):
                 content = str(content)
             if role == "user":
-                self.note(f"> {content}\n", Screen.USER)
+                self._user_turn(content, origin_of(message))
                 continue
             if role == "tool":
                 name = call_names.get(message.get("tool_call_id"), "?")
@@ -608,6 +620,10 @@ class AgentClient:
 
     def get_available_skills(self):
         return self._call("get_available_skills") or []
+
+    def get_skill_tools(self):
+        """{active skill: [the tools it declares]}."""
+        return self._call("get_skill_tools") or {}
 
     def set_selected_skills(self, names):
         self._call("set_selected_skills", names)
@@ -1106,32 +1122,6 @@ def _replay_messages(screen, messages, cfg=None, env=None):
     _Transcript(screen, cfg, env=env).replay(messages)
 
 
-def _session_preview(path, width, max_lines):
-    """the picker's right-hand preview: a '<n> messages' header then the
-    conversation tail, colored by role. shares the renderer the live :agents
-    preview uses (render._preview_lines), so assistant turns whose text lives in
-    tool calls / structured content render the same here as there, instead of the
-    blank rows a naive content read produces."""
-    from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
-    from cai.screen.render import _preview_lines
-
-    if not path:
-        return []
-    try:
-        payload = SessionsRegistry.read_flow(path)
-    except (OSError, ValueError):
-        return [f"{SGR_DIM_GRAY}could not read session{SGR_RESET}"]
-    convo = []
-    for message in (payload.get("messages") or []):
-        if message.get("role") == "system": continue
-        convo.append(message)
-    head = f"{len(convo)} messages"[:width]
-    lines = [head, ""]
-    body = max(1, max_lines - len(lines))
-    lines.extend(_preview_lines(convo, width, body))
-    return lines[:max_lines]
-
-
 def _load_session(screen, client, status, path, cfg):
     """load a .flow into the agent over the wire, then refresh the view: clear the
     viewport, replay the conversation, and follow the restored model. shared by
@@ -1145,51 +1135,39 @@ def _load_session(screen, client, status, path, cfg):
     screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META, block=True)
 
 
-def _session_tree_nodes():
+def _session_tree_nodes(wait=0.0):
     """saved sessions as a hierarchy: each .flow declares the ids of the
     sub-agents it launched (their own '<id>.flow' stems), so a child nests under
     the parent that declared it. nodes link by id; a declared child whose own
-    flow was deleted becomes a dead-end leaf rather than vanishing. the .flow
-    list is read from disk - a client-side file concern."""
-    nodes = {}
-    declared = []
-    for path in SessionsRegistry.list_sessions():
-        try:
-            payload = SessionsRegistry.read_flow(path)
-        except (OSError, ValueError):
-            continue
-        node_id = os.path.splitext(os.path.basename(path))[0]
-        node = {}
-        node["id"] = node_id
-        node["parent"] = None
-        node["name"] = SessionsRegistry.session_label(path)
-        node["path"] = path
-        node["dead_end"] = False
-        nodes[node_id] = node
-        for child_id in (payload.get("children") or []):
-            declared.append((node_id, child_id))
-
-    for parent_id, child_id in declared:
-        child = nodes.get(child_id)
-        if child is None:
-            leaf = {}
-            leaf["id"] = child_id
-            leaf["parent"] = parent_id
-            leaf["name"] = child_id
-            leaf["path"] = None
-            leaf["dead_end"] = True
-            nodes[child_id] = leaf
-            continue
-        child["parent"] = parent_id
-    return list(nodes.values())
+    flow was deleted becomes a dead-end leaf rather than vanishing. served from
+    the sessions index (cai.sessions_index): the picker calls this twice a
+    second, and the index only stats the folder - a .flow is read once, in the
+    background, and again only when it changes."""
+    index = sessions_index.default()
+    index.refresh(wait)
+    return index.nodes()
 
 
 def _open_sessions(screen, client, status, cfg):
     """open the :sessions picker (a tree of sessions and their sub-agent
-    sessions) and load the chosen saved session. building the tree reads .flow
-    files off disk; the load itself goes over the wire. Ctrl-K deletes the
-    highlighted session's .flow; a pruned dead-end has no transcript to delete."""
+    sessions) and load the chosen saved session. the rows, the search and the
+    preview all come from the in-memory sessions index, so moving between
+    sessions never waits on the disk; the load itself goes over the wire.
+    '/' filters to the sessions whose messages hold every word typed; the
+    preview reads from the session's first message (PgDn pages on). Ctrl-K
+    deletes the highlighted session's .flow; a pruned dead-end has no
+    transcript to delete."""
     from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
+
+    index = sessions_index.default()
+    query = [""]             # the filter in force, for the preview's match rows
+
+    def _fetch():
+        return _session_tree_nodes()
+
+    def _filter(pattern):
+        query[0] = pattern
+        return index.search(pattern)
 
     if not SessionsRegistry.list_sessions():
         screen.write("[no saved sessions]\n", kind=Screen.META, block=True)
@@ -1209,7 +1187,7 @@ def _open_sessions(screen, client, status, cfg):
     def _preview(node, width, max_lines):
         if node.get("path") is None:
             return [f"{SGR_DIM_GRAY}pruned - no saved transcript{SGR_RESET}"]
-        return _session_preview(node["path"], width, max_lines)
+        return index.preview(node["path"], width, max_lines, query[0])
 
     def _delete(nid):
         for node in _session_tree_nodes():
@@ -1222,14 +1200,19 @@ def _open_sessions(screen, client, status, cfg):
                 pass
             return
 
+    # give the background read a blink to finish, so an ordinary sessions
+    # folder is complete on the first frame; a huge one fills in as it lands.
+    _session_tree_nodes(wait=0.15)
     sel = screen.prompt_tree_overlay(
-        _session_tree_nodes,
+        _fetch,
         label_fn=_label,
         preview_fn=_preview,
         color_fn=_color,
         action_fn=_delete,
+        filter_fn=_filter,
+        preview_from_top=True,
         title="sessions",
-        hints='  j/k PgUp/Dn:preview /:search ↵:resume ^K:delete ESC:cancel',
+        hints='  j/k PgDn/Up:preview /:search all messages ↵:resume ^K:delete ESC:cancel',
     )
     if sel is None:
         return
@@ -1413,6 +1396,17 @@ def _paths_command(screen, client, head, arg):
         screen.write(f"[{side}: (none)]\n", kind=Screen.META, block=True)
         return
     screen.write(f"[{side}:]\n" + "\n".join(roots) + "\n", kind=Screen.META, block=True)
+
+
+def _pwd_command(screen, client):
+    """:pwd - print the agent's working directory (read over the wire: the
+    agent's cwd, which --cwd may have pointed away from the TUI's own)."""
+    try:
+        cwd = client.get_info().get("cwd", "")
+    except OSError as e:
+        screen.write(f"[:pwd {e}]\n", kind=Screen.ERROR, block=True)
+        return
+    screen.write(f"[{cwd or '(unknown)'}]\n", kind=Screen.META, block=True)
 
 
 def _save_session(screen, client, path, cfg):
@@ -1690,139 +1684,6 @@ def _open_agents(screen, client, cfg, status=None):
             screen.prompt_messages_overlay(messages)
 
 
-def _running_subagents(client):
-    """display names of the live sub-agents descended from this session's
-    agent, read solely over the agents sockets (like the :agents view):
-    every live agent answers get_info, and the descendants are walked
-    through the children lists starting from this agent."""
-    from cai.agents_registry import AgentsRegistry
-
-    infos = {}
-    for name in AgentsRegistry.list_names():
-        info = _agent_control(name, "get_info")
-        if info is None: continue
-        infos[name] = info
-    self_name = client.get_info().get("name", "")
-    self_info = infos.get(self_name) or {}
-
-    running = []
-    pending = list(self_info.get("children") or [])
-    seen = set()
-    while pending:
-        child_id = pending.pop(0)
-        if child_id in seen: continue
-        seen.add(child_id)
-        info = infos.get(child_id)
-        if info is None: continue
-        running.append(info.get("name") or child_id)
-        pending.extend(info.get("children") or [])
-    return running
-
-
-def _status_lines(model, cwd, skills, tools, subagents, allowed, disallowed, user, steer):
-    """the status widget body: dim plain text, one heading per section and one
-    name per row beneath it (the agent's cwd right under the model, since the
-    fs sandbox and relative paths resolve against it); a section with nothing to list is left out (the
-    path grants and denies included, so they only show once set). the pending
-    counts fold in as one row each. rows are padded to one width so the block
-    reads as a panel over the conversation."""
-    from cai.screen.ansi import SGR_DIM_GRAY, SGR_BOLD, SGR_RESET
-
-    rows = []
-    if model:
-        rows.append(("model", None))
-        rows.append(("  " + model, ""))
-    if cwd:
-        rows.append(("cwd", None))
-        rows.append(("  " + cwd, ""))
-    sections = []
-    sections.append(("skills", skills))
-    sections.append(("tools", tools))
-    sections.append(("sub-agents", subagents))
-    sections.append(("allowed paths", allowed))
-    sections.append(("disallowed paths", disallowed))
-    for heading, names in sections:
-        if not names: continue
-        rows.append((heading, None))
-        for name in names:
-            rows.append(("  " + name, ""))
-    if steer > 0 or user > 0:
-        rows.append(("pending", None))
-        if steer > 0:
-            rows.append((f"  {steer} steering", ""))
-        if user > 0:
-            rows.append((f"  {user} queued", ""))
-    if not rows:
-        rows.append(("(nothing active)", ""))
-    width = 0
-    for text, _style in rows:
-        width = max(width, len(text))
-    lines = []
-    for text, style in rows:
-        cell = text.ljust(width)
-        if style is None:
-            lines.append(f"{SGR_BOLD}{cell}{SGR_RESET}")
-            continue
-        lines.append(f"{SGR_DIM_GRAY}{cell}{SGR_RESET}")
-    return lines
-
-
-class _StatusWidget:
-    """the Tab-toggled 'status' hover widget: the agent's model and cwd, active skills
-    and tools and path grants/denies (read over the wire), the live sub-agents
-    (fed by the poll loop), and the pending counts. toggle() shows/hides it and paints at once; while
-    visible the poll loop refreshes it every tick so :skills / :tools / a model
-    switch / a sub-agent starting show up without any call-site wiring. visible
-    is the start state every session."""
-
-    def __init__(self, screen, client, pending):
-        self._screen = screen
-        self._client = client
-        self._pending = pending
-        self._lock = threading.Lock()
-        self._visible = True
-        self._subagents = []
-
-    @property
-    def visible(self):
-        with self._lock:
-            return self._visible
-
-    def toggle(self):
-        with self._lock:
-            self._visible = not self._visible
-            visible = self._visible
-        if not visible:
-            self._screen.remove_widget("status")
-            return
-        self.refresh()
-
-    def set_subagents(self, names):
-        with self._lock:
-            self._subagents = list(names)
-
-    def refresh(self):
-        """repaint from live state; a no-op while hidden. wire failures leave
-        the last painting in place rather than tearing the widget down."""
-        if not self.visible: return
-        try:
-            info = self._client.get_info()
-            model = info.get("model", "")
-            cwd = info.get("cwd", "")
-            skills = sorted(self._client.get_selected_skills())
-            tools = sorted(self._client.get_selected_tools())
-            paths = self._client.get_paths()
-        except OSError:
-            return
-        allowed = paths.get("allowed") or []
-        disallowed = paths.get("disallowed") or []
-        with self._lock:
-            subagents = list(self._subagents)
-        user, steer = self._pending.counts()
-        lines = _status_lines(model, cwd, skills, tools, subagents, allowed, disallowed, user, steer)
-        self._screen.add_widget("status", lines)
-
-
 def _pending_chip_lines(user, steer):
     """the pending widget body: an azure pill counting steer texts the agent
     has taken but not yet folded into the run, above a green pill counting user
@@ -1862,7 +1723,7 @@ class _Pending:
         self._steer = 0
 
     def counts(self):
-        """(user turns queued, steer texts pending) - what the status widget folds in."""
+        """(user turns queued, steer texts pending) - what the status panel shows."""
         with self._lock:
             return self._user, self._steer
 
@@ -1900,38 +1761,379 @@ class _Pending:
         self._screen.add_widget("pending", lines, bottom=True)
 
 
+def _running_subagents(client):
+    """display names of the live sub-agents descended from this session's
+    agent, read solely over the agents sockets (like the :agents view):
+    every live agent answers get_info, and the descendants are walked
+    through the children lists starting from this agent."""
+    from cai.agents_registry import AgentsRegistry
+
+    infos = {}
+    for name in AgentsRegistry.list_names():
+        info = _agent_control(name, "get_info")
+        if info is None: continue
+        infos[name] = info
+    self_name = client.get_info().get("name", "")
+    self_info = infos.get(self_name) or {}
+
+    running = []
+    pending = list(self_info.get("children") or [])
+    seen = set()
+    while pending:
+        child_id = pending.pop(0)
+        if child_id in seen: continue
+        seen.add(child_id)
+        info = infos.get(child_id)
+        if info is None: continue
+        running.append(info.get("name") or child_id)
+        pending.extend(info.get("children") or [])
+    return running
+
+
+def _agent_chip_lines(names):
+    """the agents widget body: one yellow pill per running sub-agent, all
+    padded to one width so the column reads as a block. no names, no lines."""
+    from cai.screen.ansi import SGR_YELLOW_ON_DGRAY
+    from cai.screen.chip import Chip
+
+    width = 0
+    for name in names:
+        width = max(width, len(name))
+    lines = []
+    for name in names:
+        chip = Chip(name.ljust(width), sgr=SGR_YELLOW_ON_DGRAY)
+        lines.extend(chip.lines())
+    return lines
+
+
+class _AgentChips:
+    """the 'agents' hover widget: a pill per live sub-agent, stacked above the
+    prompt beside the pending chips. the poll loop feeds it the running names;
+    it repaints only when they change, so an idle session paints nothing."""
+
+    def __init__(self, screen):
+        self._screen = screen
+        self._lock = threading.Lock()
+        self._names = []
+
+    def set_names(self, names):
+        names = list(names)
+        with self._lock:
+            if names == self._names: return
+            self._names = names
+        if not names:
+            self._screen.remove_widget("agents")
+            return
+        self._screen.add_widget("agents", _agent_chip_lines(names), bottom=True)
+
+
+# the status panel's geometry: the widest it grows, the narrowest it is still
+# worth drawing, and the label column (the longest label plus its count).
+_STATUS_MAX_WIDTH = 76
+_STATUS_MIN_WIDTH = 24
+_STATUS_LABEL_WIDTH = 12
+
+
+def _clip_tail(text, width):
+    """text cut to width columns keeping its end (the informative part of a
+    path), the cut marked with a leading ellipsis."""
+    from cai.screen.ansi import display_truncate, display_width
+
+    if display_width(text) <= width: return text
+    if width <= 1: return "…"[:width]
+    tail = display_truncate(text[::-1], width - 1)[::-1]
+    return "…" + tail
+
+
+def _clip_head(text, width):
+    """text cut to width columns keeping its start, the cut marked with a
+    trailing ellipsis."""
+    from cai.screen.ansi import display_truncate, display_width
+
+    if display_width(text) <= width: return text
+    if width <= 1: return "…"[:width]
+    return display_truncate(text, width - 1) + "…"
+
+
+def _pack_names(names, width, sgr):
+    """names flowed into as few rows of at most width columns as they need,
+    separated by a dim dot. each row is a list of (text, sgr) segments."""
+    from cai.screen.ansi import SGR_DIM_GRAY, display_width
+
+    rows = []
+    row = []
+    used = 0
+    for name in names:
+        name = _clip_head(name, width)
+        need = display_width(name)
+        if row and used + 3 + need > width:
+            rows.append(row)
+            row = []
+            used = 0
+        if row:
+            row.append((" · ", SGR_DIM_GRAY))
+            used += 3
+        row.append((name, sgr))
+        used += need
+    if row:
+        rows.append(row)
+    return rows
+
+
+def _status_rows(model, cwd, skills, skill_tools, tools, subagents, allowed, disallowed, user, steer, width):
+    """the status panel body as rows of (text, sgr) segments, at most width
+    columns each: a label column and the values beside it. the model and cwd
+    lead (the fs sandbox and relative paths resolve against the cwd); every
+    skill is a bold row with its own tools (skill_tools: {skill: [tools]})
+    indented beneath it, and the tools no skill declares get a row of their
+    own; a
+    section with nothing to list is left out, so path grants and the pending
+    counts only show once there are any."""
+    from cai.screen.ansi import (
+        SGR_BOLD, SGR_CYAN, SGR_DIM_GRAY, SGR_GREEN, SGR_RED, SGR_YELLOW,
+        SGR_BOLD_AZURE, SGR_MAGENTA,
+    )
+
+    value_width = max(1, width - _STATUS_LABEL_WIDTH)
+    rows = []
+
+    def section(label, count, value_rows):
+        """one labelled block: the label (and a dim count) on its first row,
+        the label column left blank on the rows that follow."""
+        head = [(label, SGR_CYAN)]
+        used = len(label)
+        if count is not None:
+            tag = f" {count}"
+            head.append((tag, SGR_DIM_GRAY))
+            used += len(tag)
+        head.append((" " * max(1, _STATUS_LABEL_WIDTH - used), ""))
+        indent = [(" " * _STATUS_LABEL_WIDTH, "")]
+        for i, value_row in enumerate(value_rows):
+            if i == 0:
+                rows.append(head + value_row)
+                continue
+            rows.append(indent + value_row)
+
+    if model:
+        section("model", None, [[(_clip_head(model, value_width), SGR_BOLD)]])
+    if cwd:
+        section("cwd", None, [[(_clip_tail(cwd, value_width), "")]])
+    if rows:
+        rows.append([])
+
+    before = len(rows)
+    # each skill heads the tools it brought in (only the ones still selected);
+    # tools no skill declares - picked by hand in :tools - follow on their own.
+    selected = set(tools)
+    claimed = set()
+    for skill in skills:
+        own = []
+        for tool in skill_tools.get(skill) or []:
+            if tool not in selected: continue
+            own.append(tool)
+            claimed.add(tool)
+        value_rows = [[("◆ ", SGR_MAGENTA), (_clip_head(skill, value_width - 2), SGR_BOLD)]]
+        for packed in _pack_names(own, value_width - 2, SGR_GREEN):
+            value_rows.append([("  ", "")] + packed)
+        label = ""
+        count = None
+        if skill == skills[0]:
+            label = "skills"
+            count = len(skills)
+        section(label, count, value_rows)
+    loose = []
+    for tool in tools:
+        if tool in claimed: continue
+        loose.append(tool)
+    if loose:
+        section("tools", len(loose), _pack_names(loose, value_width, SGR_GREEN))
+    if subagents:
+        agent_rows = []
+        for name in subagents:
+            agent_rows.append([("● ", SGR_YELLOW), (_clip_head(name, value_width - 2), "")])
+        section("agents", len(subagents), agent_rows)
+    if allowed:
+        path_rows = []
+        for path in allowed:
+            path_rows.append([("+ ", SGR_GREEN), (_clip_tail(path, value_width - 2), "")])
+        section("allowed", None, path_rows)
+    if disallowed:
+        path_rows = []
+        for path in disallowed:
+            path_rows.append([("- ", SGR_RED), (_clip_tail(path, value_width - 2), "")])
+        section("denied", None, path_rows)
+    if steer > 0 or user > 0:
+        counts = []
+        if steer > 0:
+            counts.append((f"{steer} steering", SGR_BOLD_AZURE))
+        if steer > 0 and user > 0:
+            counts.append((" · ", SGR_DIM_GRAY))
+        if user > 0:
+            counts.append((f"{user} queued", SGR_GREEN))
+        section("pending", None, [counts])
+    if len(rows) == before:
+        rows.append([("no skills or tools active", SGR_DIM_GRAY)])
+    return rows
+
+
+def _status_panel_lines(rows, max_rows, max_cols):
+    """the rows from _status_rows inside a rounded frame titled 'status',
+    every line the same width so the block reads as a window. the frame is
+    as wide as its longest row (capped by the caller's row width); a body
+    taller than max_rows is cut and closed with a '+N more' row. returns []
+    when the viewport is too small to hold a frame at all."""
+    from cai.screen.ansi import SGR_BOLD_AZURE, SGR_DIM_GRAY, SGR_RESET, display_width
+
+    title = " status "
+    hint = " Tab to close "
+    inner = len(title) + len(hint) + 2
+    for row in rows:
+        width = 0
+        for text, _sgr in row:
+            width += display_width(text)
+        inner = max(inner, width)
+    # one column of border and two of padding on each side.
+    if inner + 6 > max_cols or max_rows < 5: return []
+
+    body_room = max_rows - 4
+    shown = rows
+    if len(rows) > body_room:
+        shown = rows[:body_room - 1]
+        shown.append([(f"+{len(rows) - len(shown)} more", SGR_DIM_GRAY)])
+
+    frame = SGR_DIM_GRAY
+    span = inner + 4
+    lines = []
+    lines.append(f"{frame}╭─{SGR_RESET}{SGR_BOLD_AZURE}{title}{SGR_RESET}"
+                 f"{frame}{'─' * (span - 1 - len(title))}╮{SGR_RESET}")
+    blank = f"{frame}│{SGR_RESET}{' ' * span}{frame}│{SGR_RESET}"
+    lines.append(blank)
+    for row in shown:
+        cells = []
+        width = 0
+        for text, sgr in row:
+            width += display_width(text)
+            if sgr:
+                cells.append(f"{sgr}{text}{SGR_RESET}")
+                continue
+            cells.append(text)
+        pad = " " * (inner - width)
+        lines.append(f"{frame}│{SGR_RESET}  {''.join(cells)}{pad}  {frame}│{SGR_RESET}")
+    lines.append(blank)
+    lines.append(f"{frame}╰{'─' * (span - 1 - len(hint))}{hint}─╯{SGR_RESET}")
+    return lines
+
+
+class _StatusPanel:
+    """the Tab-toggled status panel: a framed window in the middle of the
+    viewport showing the agent's model and cwd, active skills and tools and
+    path grants/denies (read over the wire), the live sub-agents (fed by the
+    poll loop), and the pending counts. it hovers - the conversation and the
+    prompt stay live beneath it. toggle() shows/hides it and paints at once;
+    while visible the poll loop refreshes it every tick, so :skills / :tools /
+    a model switch / a sub-agent starting / a terminal resize show up without
+    any call-site wiring. hidden is the start state."""
+
+    def __init__(self, screen, client, pending):
+        self._screen = screen
+        self._client = client
+        self._pending = pending
+        self._lock = threading.Lock()
+        self._visible = False
+        self._subagents = []
+
+    @property
+    def visible(self):
+        with self._lock:
+            return self._visible
+
+    def toggle(self):
+        with self._lock:
+            self._visible = not self._visible
+            visible = self._visible
+        if not visible:
+            self._screen.remove_widget("status")
+            return
+        self.refresh()
+
+    def set_subagents(self, names):
+        with self._lock:
+            self._subagents = list(names)
+
+    def refresh(self):
+        """repaint from live state; a no-op while hidden. wire failures leave
+        the last painting in place rather than tearing the panel down."""
+        if not self.visible: return
+        try:
+            info = self._client.get_info()
+            skills = list(self._client.get_selected_skills())
+            skill_tools = self._client.get_skill_tools()
+            tools = sorted(self._client.get_selected_tools())
+            paths = self._client.get_paths()
+        except OSError:
+            return
+        with self._lock:
+            subagents = list(self._subagents)
+        user, steer = self._pending.counts()
+        max_rows, max_cols = self._screen.viewport_size()
+        width = min(_STATUS_MAX_WIDTH, max_cols - 6)
+        lines = []
+        if width >= _STATUS_MIN_WIDTH:
+            rows = _status_rows(info.get("model", ""),
+                                info.get("cwd", ""),
+                                skills,
+                                skill_tools,
+                                tools,
+                                subagents,
+                                paths.get("allowed") or [],
+                                paths.get("disallowed") or [],
+                                user,
+                                steer,
+                                width)
+            lines = _status_panel_lines(rows, max_rows, max_cols)
+        if not lines:
+            self._screen.remove_widget("status")
+            return
+        self._screen.add_widget("status", lines, center=True)
+
+
 # how often the poll loop re-reads the agent (and the agents sockets) for state
-# no event announces: the steer count, and the status widget while visible.
+# no event announces: the steer count and the live sub-agents.
 _AGENTS_REFRESH = 1.0
 
 
 class _PollLoop(threading.Thread):
     """polls the agent-side state no event on this run's stream announces,
     every _AGENTS_REFRESH seconds: the steer count into the 'pending' chip,
-    and - only while the status widget is visible - the live sub-agents
-    (walked over the agents sockets) plus a repaint of the widget, so it
-    tracks :skills / :tools / model switches / pending counts by itself."""
+    and the live sub-agents (walked over the agents sockets) into the
+    'agents' chips and the status panel, which is repainted while visible."""
 
-    def __init__(self, client, stop, pending, status_widget):
+    def __init__(self, client, stop, pending, agent_chips, status_panel):
         super().__init__(daemon=True, name="cai-tui-poll")
         self._client = client
         self._stop_event = stop
         self._pending = pending
-        self._status_widget = status_widget
+        self._agent_chips = agent_chips
+        self._status_panel = status_panel
 
     def run(self):
         while not self._stop_event.wait(_AGENTS_REFRESH):
             try:
-                steer = self._client.get_info().get("pending_steer", 0)
+                info = self._client.get_info()
             except OSError:
                 continue
-            self._pending.set_steer(steer)
-            if not self._status_widget.visible: continue
-            try:
-                self._status_widget.set_subagents(_running_subagents(self._client))
-            except OSError:
-                continue
-            self._status_widget.refresh()
+            self._pending.set_steer(info.get("pending_steer", 0))
+            # an agent that never launched a child has none to look for: skip
+            # the walk over every live agent's socket.
+            names = []
+            if info.get("children"):
+                try:
+                    names = _running_subagents(self._client)
+                except OSError:
+                    continue
+            self._agent_chips.set_names(names)
+            self._status_panel.set_subagents(names)
+            self._status_panel.refresh()
 
 
 def _tool_label(name):
@@ -2051,7 +2253,7 @@ def _refresh_tokens(status):
     status.set_tokens(0)
 
 
-def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, ui, status_widget):
+def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, ui, status_panel):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -2080,6 +2282,9 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, u
             return False
         screen.clear_buffer()
         _replay_messages(screen, client.get_messages(), env.settings)
+        return False
+    if head == "pwd":
+        _pwd_command(screen, client)
         return False
     if head == "allow" or head == "disallow":
         # set_paths is a deferred op (servers restart between turns), so a
@@ -2111,7 +2316,7 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending, u
         _open_pending(screen, client, jobs, pending)
         return False
     if head == "status":
-        status_widget.toggle()
+        status_panel.toggle()
         return False
     if head == "config":
         _open_config(screen, client, env.settings)
@@ -2320,6 +2525,8 @@ def run(*,
         last = msgs[-1]
         if last.get("role") != "user":
             return None
+        if origin_of(last) is not None:
+            return None     # a sub-agent's report, not a prompt the user typed
         content = last.get("content")
         if not isinstance(content, str):
             return None
@@ -2329,14 +2536,16 @@ def run(*,
     screen.set_recall_handler(_on_recall)
 
     pending = _Pending(screen)
-    status_widget = _StatusWidget(screen, client, pending)
-    status_widget.refresh()
     worker = _Worker(client, screen, jobs, stop, status, env.settings, pending)
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
-    poll_loop = _PollLoop(client, stop, pending, status_widget)
+    status_panel = _StatusPanel(screen, client, pending)
+    poll_loop = _PollLoop(client, stop, pending, _AgentChips(screen), status_panel)
     poll_loop.start()
+    # read the saved sessions in the background now, so :sessions opens on a
+    # full index instead of reading them while the user waits.
+    sessions_index.default().warm()
 
     screen.write(f"cai — model {model}. type to chat; :q to quit; Tab for status.\n",
                  kind=Screen.META, block=True)
@@ -2363,7 +2572,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending, worker._ui, status_widget):
+                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending, worker._ui, status_panel):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just

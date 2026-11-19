@@ -26,7 +26,7 @@ import time
 import tty
 
 from ..ansi import (
-    ALT_ENTER, ALT_EXIT,
+    ALT_ENTER,
     CUR_HIDE,
     ERASE_SCREEN,
     SGR_BOLD_AZURE,
@@ -134,6 +134,8 @@ def prompt_tree_overlay(screen,
                         is_self_fn=None,
                         action_fn=None,
                         flatten_fn=_flatten_tree,
+                        filter_fn=None,
+                        preview_from_top=False,
                         title="tree",
                         hints='  j/k /:search ↵:open ESC:cancel'):
     """live tree picker. fetch_fn() -> list of node dicts (each with 'id' and
@@ -145,7 +147,15 @@ def prompt_tree_overlay(screen,
     a node that disappears from a later fetch is retained with node['present'] =
     False so the tree stays stable - render it accordingly in your callbacks.
     flatten_fn picks the row layout: the default nests every child; _flatten_history
-    keeps the first child on the trunk so a linear chain renders flat."""
+    keeps the first child on the trunk so a linear chain renders flat.
+
+    filter_fn(pattern) -> the ids to show, best first: when given, '/' filters
+    instead of jumping - the rows narrow to what it returns as the pattern is
+    typed (the caller decides what a pattern matches: the sessions view
+    searches every message, not just the row labels). Enter keeps the filter
+    and returns to navigation, Esc (or an emptied pattern) lifts it.
+    preview_from_top reads the preview from its first line: preview_fn then
+    returns the head, and PgDn/PgUp page down from it and back."""
     nodes_by_id = {}
     order = []
 
@@ -184,11 +194,20 @@ def prompt_tree_overlay(screen,
     pre_search_idx = 0
     prev_key = ''
 
+    active_filter = ''   # the pattern the rows are currently narrowed by
+    allowed = None       # ids filter_fn returned for it, best first; None = all
+
     def _rebuild_rows():
         nonlocal flat, labels, filtered
         ordered = []
-        for nid in order:
-            ordered.append(nodes_by_id[nid])
+        if allowed is None:
+            for nid in order:
+                ordered.append(nodes_by_id[nid])
+        else:
+            for nid in allowed:
+                node = nodes_by_id.get(nid)
+                if node is None: continue
+                ordered.append(node)
         flat = flatten_fn(ordered)
         labels = []
         for node, connector in flat:
@@ -216,13 +235,43 @@ def prompt_tree_overlay(screen,
             return []
         return preview_fn(flat[selected_idx][0], width, max_lines)
 
+    def _apply_filter(pattern):
+        """narrow the rows to filter_fn(pattern) - a no-op until the pattern
+        changes, so navigating a filtered list never re-runs the search. a
+        new pattern puts the cursor on the best match; lifting the filter
+        leaves it on the row it was on."""
+        nonlocal active_filter, allowed, selected_idx, preview_scroll
+        nonlocal search_matches, search_match_idx
+        search_matches = []          # '/' filters here: no n/N jump list
+        search_match_idx = -1
+        if pattern == active_filter:
+            selected_idx = min(selected_idx, max(0, len(filtered) - 1))
+            return
+        keep_id = _selected_id()
+        active_filter = pattern
+        allowed = None
+        if pattern:
+            allowed = list(filter_fn(pattern) or [])
+        _rebuild_rows()
+        selected_idx = 0
+        if not pattern and keep_id is not None:
+            for i, (node, _connector) in enumerate(flat):
+                if node['id'] != keep_id: continue
+                selected_idx = i
+                break
+        preview_scroll = 0
+
     def _refresh_data(purge=False):
-        nonlocal selected_idx, search_matches, search_match_idx
+        nonlocal selected_idx, search_matches, search_match_idx, allowed
         keep_id = _selected_id()
         if purge:
             order.clear()
             nodes_by_id.clear()
         _merge(fetch_fn())
+        if filter_fn is not None and active_filter:
+            # the data moved under the filter (a row deleted, more rows
+            # loaded): ask again so the narrowed list keeps up.
+            allowed = list(filter_fn(active_filter) or [])
         _rebuild_rows()
         if keep_id is not None:
             for i, (node, _connector) in enumerate(flat):
@@ -230,7 +279,7 @@ def prompt_tree_overlay(screen,
                 selected_idx = i
                 break
         selected_idx = min(selected_idx, max(0, len(filtered) - 1))
-        if search_pattern:
+        if search_pattern and filter_fn is None:
             search_matches = _find_matches(filtered, search_pattern)
             search_match_idx = min(search_match_idx, len(search_matches) - 1)
 
@@ -252,6 +301,7 @@ def prompt_tree_overlay(screen,
             hints,
             _row_colors(),
             preview_scroll=preview_scroll,
+            preview_from_top=preview_from_top,
         )
         first_draw[0] = False
 
@@ -312,6 +362,11 @@ def prompt_tree_overlay(screen,
                         search_pattern, search_buf, search_matches,
                         search_match_idx, pre_search_idx, search_direction,
                     )
+                if filter_fn is not None:
+                    typed = search_pattern
+                    if search_mode:
+                        typed = ''.join(search_buf)
+                    _apply_filter(typed)
                 if selected_idx != before:
                     preview_scroll = 0
                 _redraw()
@@ -339,7 +394,12 @@ def prompt_tree_overlay(screen,
                 overhead = 4
                 vis = max(5, int(screen._rows * 0.95)) - overhead
                 page = max(1, vis - 1)
-                if key == KEY_PGUP:
+                # scroll counts away from the pane's anchor: up from a tail,
+                # down from a head - so the keys swap with preview_from_top.
+                away = KEY_PGUP
+                if preview_from_top:
+                    away = KEY_PGDN
+                if key == away:
                     preview_scroll += page
                 else:
                     preview_scroll = max(0, preview_scroll - page)
@@ -390,7 +450,10 @@ def prompt_tree_overlay(screen,
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
-        sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
+        # stay in the alternate screen: the main TUI lives there too, so
+        # leaving it would flash the terminal's primary buffer (the shell's
+        # scrollback) until the screen's restore repaints the session.
+        sys.stdout.write(CUR_HIDE)
         sys.stdout.flush()
 
     return result

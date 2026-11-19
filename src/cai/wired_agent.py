@@ -407,7 +407,8 @@ class WiredAgent:
             # a drain-run so the worker (never this reader thread) delivers it,
             # broadcasting to every client like any other turn.
             text = msg.get("text") or ""
-            if not self.agent.steer(text, run_on_idle=False):
+            origin = msg.get("origin") or None
+            if not self.agent.steer(text, run_on_idle=False, origin=origin):
                 self._work.put(("steer-run",))
             return
         if kind == Wire.INTERRUPT:
@@ -543,6 +544,8 @@ class WiredAgent:
             return True, None, None
         if op == "get_selected_skills":
             return True, agent.get_selected_skills(), None
+        if op == "get_skill_tools":
+            return True, agent.get_skill_tools(), None
         if op == "get_available_skills":
             return True, agent.get_available_skills(), None
         if op == "set_selected_skills":

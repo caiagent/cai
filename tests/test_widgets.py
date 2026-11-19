@@ -1,7 +1,6 @@
 """Tests for the hover-widget layer: the Chip primitive (a styled pill with
-optional position and timeout), the pending chip builder, the Tab-toggled
-status widget, the layout's top-right widget painting with +N truncation, and
-the screen's widget registry flattening."""
+optional position and timeout), the pending chip builder, the layout's top-right widget painting with +N
+truncation, and the screen's widget registry flattening."""
 import re
 import threading
 import time
@@ -10,7 +9,8 @@ from cai.screen.ansi import ansi_strip, cur_move
 from cai.screen.chip import Chip
 from cai.screen.layout import Layout
 from cai.screen.screen import Screen
-from cai.tui import _pending_chip_lines, _Pending, _status_lines, _StatusWidget
+from cai.tui import _pending_chip_lines, _Pending, _agent_chip_lines, _AgentChips
+from cai.tui import _status_rows, _status_panel_lines, _StatusPanel
 
 
 # --- the Chip primitive ---
@@ -67,8 +67,11 @@ class _WidgetHost:
     def __init__(self):
         self.widgets = {}
 
-    def add_widget(self, name, lines, bottom=False):
+    def add_widget(self, name, lines, bottom=False, center=False):
         self.widgets[name] = lines
+
+    def viewport_size(self):
+        return 40, 100
 
     def remove_widget(self, name):
         self.widgets.pop(name, None)
@@ -117,6 +120,7 @@ class _ChipHost:
         self._widgets = {}
         self._positioned_chips = {}
         self._bottom_widgets = {}
+        self._center_widgets = {}
         self._chip_timers = {}
         self._render_lock = threading.RLock()
         self._focus_stack = ['overlay']
@@ -218,94 +222,211 @@ def test_prompt_entries_skip_blanks():
     assert _prompt_entries(["", "  \n ", "real"]) == {"real": "real"}
 
 
-# --- the status widget ---
 
+# --- the sub-agent chips ---
 
-def test_status_lines_sections_and_padding():
-    lines = _status_lines("gpt-x", "", ["git"], ["fs__read"], [], [], [], 0, 0)
+def test_agent_chip_lines_one_padded_pill_per_agent():
+    assert _agent_chip_lines([]) == []
+    lines = _agent_chip_lines(["scout", "audit-auth-flow"])
     plain = []
     for line in lines:
         plain.append(ansi_strip(line))
-    assert plain[0].strip() == "model"
-    assert plain[1].strip() == "gpt-x"
-    assert plain[2].strip() == "skills"
-    assert plain[3].strip() == "git"
-    assert plain[4].strip() == "tools"
-    assert plain[5].strip() == "fs__read"
-    assert "sub-agents" not in " ".join(plain)       # empty section is left out
-    widths = set()
-    for text in plain:
-        widths.add(len(text))
-    assert len(widths) == 1
+    assert plain == [" scout           ", " audit-auth-flow "]
 
 
-def test_status_lines_pending_and_subagents_and_empty():
+def test_agent_chips_follow_the_running_names():
+    host = _WidgetHost()
+    chips = _AgentChips(host)
+    chips.set_names([])
+    assert "agents" not in host.widgets            # idle: nothing painted
+    chips.set_names(["scout"])
+    assert ansi_strip(host.widgets["agents"][0]).strip() == "scout"
+    painted = host.widgets["agents"]
+    chips.set_names(["scout"])
+    assert host.widgets["agents"] is painted       # unchanged: no repaint
+    chips.set_names(["scout", "audit"])
+    assert len(host.widgets["agents"]) == 2
+    chips.set_names([])
+    assert "agents" not in host.widgets            # all finished: chip gone
+
+
+def test_agent_chips_are_a_bottom_widget_like_pending():
+    calls = []
+
+    class _Host:
+        def add_widget(self, name, lines, bottom=False):
+            calls.append((name, bottom))
+
+        def remove_widget(self, name):
+            pass
+    _AgentChips(_Host()).set_names(["scout"])
+    assert calls == [("agents", True)]
+
+
+# --- the status panel: a framed window in the middle of the viewport ---
+
+
+def _panel(max_rows=40, max_cols=100, width=60, **overrides):
+    fields = {
+        "model": "gpt-x",
+        "cwd": "/work/project",
+        "skills": ["fs-read-only", "subagents"],
+        "skill_tools": {"fs-read-only": ["grep", "read_file"], "subagents": ["launch_agent"]},
+        "tools": ["grep", "launch_agent", "python", "read_file"],
+        "subagents": [],
+        "allowed": [],
+        "disallowed": [],
+        "user": 0,
+        "steer": 0,
+    }
+    fields.update(overrides)
+    rows = _status_rows(fields["model"],
+                        fields["cwd"],
+                        fields["skills"],
+                        fields["skill_tools"],
+                        fields["tools"],
+                        fields["subagents"],
+                        fields["allowed"],
+                        fields["disallowed"],
+                        fields["user"],
+                        fields["steer"],
+                        width)
+    lines = _status_panel_lines(rows, max_rows, max_cols)
     plain = []
-    for line in _status_lines("", "", [], [], ["scout"], [], [], 2, 1):
-        plain.append(ansi_strip(line).strip())
-    assert plain == ["sub-agents", "scout", "pending", "1 steering", "2 queued"]
-    assert ansi_strip(_status_lines("", "", [], [], [], [], [], 0, 0)[0]).strip() == "(nothing active)"
+    for line in lines:
+        plain.append(ansi_strip(line))
+    return plain
 
 
-def test_status_lines_paths_show_only_when_set():
-    plain = []
-    for line in _status_lines("", "", [], [], [], ["/data"], ["/data/secret.txt"], 0, 0):
-        plain.append(ansi_strip(line).strip())
-    assert plain == ["allowed paths", "/data", "disallowed paths", "/data/secret.txt"]
-    text = " ".join(_status_lines("m", "", [], [], [], [], [], 0, 0))
-    assert "paths" not in text
+def test_status_panel_is_a_closed_frame_of_one_width():
+    plain = _panel()
+    assert plain[0].startswith("╭─ status ")
+    assert plain[0].endswith("╮")
+    assert plain[-1].startswith("╰")
+    assert plain[-1].endswith("╯")
+    for line in plain[1:-1]:
+        assert line.startswith("│")
+        assert line.endswith("│")
+    assert len({len(line) for line in plain}) == 1
 
 
-def test_status_lines_cwd_under_model():
-    plain = []
-    for line in _status_lines("m", "/home/me/proj", [], [], [], [], [], 0, 0):
-        plain.append(ansi_strip(line).strip())
-    assert plain == ["model", "m", "cwd", "/home/me/proj"]
+def test_status_panel_lists_what_the_status_view_listed():
+    body = "\n".join(_panel(subagents=["scout"],
+                            allowed=["/data"],
+                            disallowed=["/secret"],
+                            user=1,
+                            steer=2))
+    for needle in ("gpt-x", "/work/project", "fs-read-only", "subagents",
+                   "grep", "read_file", "scout", "/data", "/secret",
+                   "2 steering", "1 queued"):
+        assert needle in body
 
 
-class _StatusClient:
-    def __init__(self):
-        self.model = "m1"
-        self.skills = ["python"]
-        self.tools = ["echo"]
-        self.allowed = []
+def test_status_panel_groups_each_skill_with_its_tools():
+    plain = _panel()
+    index = {}
+    for i, line in enumerate(plain):
+        for name in ("◆ fs-read-only", "◆ subagents", "grep", "launch_agent", "python"):
+            if name in line:
+                index.setdefault(name, i)
+    assert index["◆ fs-read-only"] < index["grep"] < index["◆ subagents"] < index["launch_agent"]
+    assert "read_file" in plain[index["grep"]]         # a skill's tools share its block
+    # a tool no skill declares sits under its own 'tools' label, after the skills
+    assert "tools 1" in plain[index["python"]]
+    assert index["python"] > index["launch_agent"]
 
+
+def test_status_panel_hides_a_skill_tool_that_was_deselected():
+    body = "\n".join(_panel(tools=["grep"]))
+    assert "grep" in body
+    assert "read_file" not in body
+    assert "launch_agent" not in body
+    assert "◆ subagents" in body                       # the skill itself still shows
+
+
+def test_status_panel_colours_skills_and_tools_differently():
+    rows = _status_rows("m", "/w", ["s"], {"s": ["t"]}, ["t"], [], [], [], 0, 0, 60)
+    styles = {}
+    for row in rows:
+        for text, sgr in row:
+            styles[text] = sgr
+    assert styles["s"] != styles["t"]
+    assert styles["s"] and styles["t"]
+
+
+def test_status_panel_leaves_out_empty_sections():
+    body = "\n".join(_panel())
+    for label in ("agents ", "allowed", "denied", "pending"):
+        assert label not in body.replace("subagents", "")
+
+
+def test_status_panel_wraps_long_name_lists_inside_the_frame():
+    tools = []
+    for i in range(40):
+        tools.append(f"tool_number_{i}")
+    plain = _panel(tools=tools, max_cols=70, width=60)
+    assert len(plain[0]) <= 70
+    assert len({len(line) for line in plain}) == 1
+    assert "tool_number_39" in "\n".join(plain)
+
+
+def test_status_panel_cuts_a_body_taller_than_the_viewport():
+    tools = []
+    for i in range(200):
+        tools.append(f"tool_number_{i}")
+    plain = _panel(tools=tools, max_rows=12)
+    assert len(plain) == 12
+    assert "more" in plain[-3]
+
+
+def test_status_panel_keeps_the_end_of_a_long_cwd():
+    body = "\n".join(_panel(cwd="/a" * 80 + "/leaf", width=40))
+    assert "/leaf" in body
+    assert "…" in body
+
+
+def test_status_panel_gives_up_when_the_viewport_is_too_small():
+    assert _panel(max_cols=20) == []
+    assert _panel(max_rows=4) == []
+
+
+class _PanelClient:
     def get_info(self):
-        return {"model": self.model, "cwd": "/srv/work"}
+        return {"model": "gpt-x", "cwd": "/work"}
 
     def get_selected_skills(self):
-        return list(self.skills)
+        return ["subagents"]
+
+    def get_skill_tools(self):
+        return {"subagents": ["grep"]}
 
     def get_selected_tools(self):
-        return list(self.tools)
+        return ["grep"]
 
     def get_paths(self):
-        return {"allowed": list(self.allowed), "disallowed": []}
+        return {"allowed": [], "disallowed": []}
 
 
-def test_status_widget_toggles_and_refreshes_only_while_visible():
+def test_status_panel_starts_hidden_and_toggles():
     host = _WidgetHost()
-    pending = _Pending(host)
-    client = _StatusClient()
-    widget = _StatusWidget(host, client, pending)
-    assert widget.visible is True                   # shown by default
-    widget.toggle()
-    widget.refresh()
-    assert "status" not in host.widgets             # hidden: refresh paints nothing
-    widget.toggle()
-    assert widget.visible is True
-    text = " ".join(ansi_strip(l) for l in host.widgets["status"])
-    assert "m1" in text and "python" in text and "echo" in text
-    assert "cwd" in text and "/srv/work" in text
-    assert "allowed paths" not in text
-    client.skills = ["python", "fs"]
-    client.allowed = ["/data"]
-    widget.set_subagents(["scout"])
-    pending.user_queued()
-    widget.refresh()
-    text = " ".join(ansi_strip(l) for l in host.widgets["status"])
-    assert "fs" in text and "scout" in text and "1 queued" in text
-    assert "allowed paths" in text and "/data" in text
-    widget.toggle()
-    assert widget.visible is False
+    panel = _StatusPanel(host, _PanelClient(), _Pending(host))
+    panel.refresh()
+    assert "status" not in host.widgets            # hidden: refresh paints nothing
+    panel.toggle()
+    assert "gpt-x" in ansi_strip("\n".join(host.widgets["status"]))
+    panel.set_subagents(["scout"])
+    panel.refresh()
+    assert "scout" in ansi_strip("\n".join(host.widgets["status"]))
+    panel.toggle()
     assert "status" not in host.widgets
+
+
+def test_center_widget_is_placed_in_the_middle_and_painted_last():
+    host = _ChipHost()
+    host.add_widget = Screen.add_widget.__get__(host)
+    host._layout = Layout(rows=24, cols=80)
+    host.add_widget("pending", ["bottom"], bottom=True)
+    host.add_widget("status", ["abcd", "efgh"], center=True)
+    cells = host._positioned_cells()
+    rows = host._layout.content_rows
+    assert cells[-2:] == [((rows - 2) // 2, 38, "abcd"), ((rows - 2) // 2 + 1, 38, "efgh")]

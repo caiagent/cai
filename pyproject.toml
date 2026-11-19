@@ -1,6 +1,6 @@
 [project]
 name = "cai"
-version = "0.1.17"
+version = "0.1.18"
 description = "A small LLM agent, built from scratch layer by layer."
 license = "MIT"
 requires-python = ">=3.11"
@@ -11,7 +11,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# what the examples/extensions/markdown renderer uses when present: a CommonMark
+# parser and a syntax highlighter. optional - without them it renders plainly.
+markdown = ["markdown-it-py", "pygments"]
+dev = ["pytest", "markdown-it-py", "pygments"]
 
 [project.scripts]
 cai = "cai.cli:main"

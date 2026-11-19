@@ -15,7 +15,7 @@ import termios
 import tty
 
 from ..ansi import (
-    ALT_ENTER, ALT_EXIT,
+    ALT_ENTER,
     CUR_HIDE,
     ERASE_SCREEN,
     SGR_RESET, SGR_DIM_GRAY, SGR_BOLD, SGR_YELLOW, SGR_GREEN, SGR_BOLD_RED,
@@ -265,7 +265,10 @@ def run_streaming_transform(screen, fn, name, selected, kwargs, *, header=''):
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
-        sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
+        # stay in the alternate screen: the main TUI lives there too, so
+        # leaving it would flash the terminal's primary buffer (the shell's
+        # scrollback) until the screen's restore repaints the session.
+        sys.stdout.write(CUR_HIDE)
         sys.stdout.flush()
 
     return result

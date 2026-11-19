@@ -31,7 +31,7 @@ from .ansi import (
     MOUSE_ON, MOUSE_OFF,
     BRACKET_PASTE_ON, BRACKET_PASTE_OFF,
     SYNC_START, SYNC_END,
-    cur_move, ansi_strip, wrap_ansi,
+    cur_move, ansi_strip, wrap_ansi, display_width,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer, GUTTER_GLYPH
@@ -139,6 +139,10 @@ class Screen:
         # bottom hover widgets: name -> pre-styled lines, stacked up from the
         # bottom-right corner of the viewport, just above the prompt.
         self._bottom_widgets = {}
+
+        # centre hover widgets: name -> pre-styled lines, painted as one
+        # block in the middle of the viewport, over everything else.
+        self._center_widgets = {}
 
         # chips with an explicit position: name -> Chip, painted at their
         # own (row, col) anchor instead of the top-right stack. chip
@@ -566,14 +570,17 @@ class Screen:
         finally:
             self.pop_focus()
 
-    def add_widget(self, name, lines, bottom=False):
+    def add_widget(self, name, lines, bottom=False, center=False):
         """add or replace a hover widget: a block of pre-styled lines painted
         over the conversation, anchored top-right (bottom-right, just above the
-        prompt, with bottom=True). widgets stack vertically in insertion order;
-        replacing an existing name keeps its slot. lines carry their own SGR
-        styling - the screen just places them."""
+        prompt, with bottom=True; the middle of the viewport, over the other
+        widgets, with center=True). widgets stack vertically in insertion
+        order; replacing an existing name keeps its slot. lines carry their
+        own SGR styling - the screen just places them."""
         with self._render_lock:
-            if bottom:
+            if center:
+                self._center_widgets[name] = list(lines)
+            elif bottom:
                 self._bottom_widgets[name] = list(lines)
             else:
                 self._widgets[name] = list(lines)
@@ -585,7 +592,8 @@ class Screen:
         with self._render_lock:
             stacked = self._widgets.pop(name, None)
             bottom = self._bottom_widgets.pop(name, None)
-            if stacked is None and bottom is None: return
+            centered = self._center_widgets.pop(name, None)
+            if stacked is None and bottom is None and centered is None: return
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
 
@@ -627,7 +635,8 @@ class Screen:
     def _positioned_cells(self):
         """(vrow, col, text) placements for the positioned chips, one cell
         per framed line, anchored at each chip's (row, col), then the bottom
-        widgets stacked up from the viewport's bottom-right corner."""
+        widgets stacked up from the viewport's bottom-right corner, then the
+        centre widgets - last, so they paint over whatever they overlap."""
         cells = []
         for chip in self._positioned_chips.values():
             row, col = chip.position
@@ -638,7 +647,7 @@ class Screen:
             if lines:
                 lines.append('')
             lines.extend(self._bottom_widgets[name])
-        if not lines: return cells
+        if not lines and not self._center_widgets: return cells
         rows = self._layout.content_rows
         cols = self._layout.cols
         top = rows - len(lines)
@@ -646,7 +655,20 @@ class Screen:
             width = len(ansi_strip(line))
             if width == 0: continue
             cells.append((top + i, max(0, cols - width), line))
+        for block in self._center_widgets.values():
+            width = 0
+            for line in block:
+                width = max(width, display_width(line))
+            top = max(0, (rows - len(block)) // 2)
+            left = max(0, (cols - width) // 2)
+            for i, line in enumerate(block):
+                cells.append((top + i, left, line))
         return cells
+
+    def viewport_size(self):
+        """(rows, cols) of the content viewport - what a centre widget has
+        to fit inside."""
+        return self._layout.content_rows, self._layout.cols
 
     def _widget_lines(self):
         """all widgets' lines flattened in insertion order, top to bottom,
@@ -921,8 +943,16 @@ class Screen:
         content_rows = self._layout.content_rows
         if self._state.auto_scroll:
             self._state.viewport_offset = max(0, total - content_rows)
-        sys.stdout.write(ALT_ENTER + MOUSE_ON + BRACKET_PASTE_ON + ERASE_SCREEN)
-        self._refresh_all()
+        # one synchronized frame: the erase and the repaint land together, so
+        # the terminal never shows the blank (or the overlay's leftovers) in
+        # between. ALT_ENTER is a no-op after an overlay (it never left the
+        # alternate screen) and the way back after an editor, which did.
+        self._begin_frame()
+        try:
+            sys.stdout.write(ALT_ENTER + MOUSE_ON + BRACKET_PASTE_ON + ERASE_SCREEN)
+            self._refresh_all()
+        finally:
+            self._end_frame()
         self._write_pending = False
         self._last_render_time = time.monotonic()
 

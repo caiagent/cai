@@ -8,7 +8,7 @@ import termios
 import tty
 
 from ..ansi import (
-    ALT_ENTER, ALT_EXIT,
+    ALT_ENTER,
     CUR_SHOW, CUR_HIDE,
     ERASE_SCREEN,
     SGR_RESET, SGR_REVERSE, SGR_DIM_GRAY, SGR_BOLD_AZURE,
@@ -255,8 +255,12 @@ def _draw_model_overlay(rows,
                         row_colors=None,
                         prices=None,
                         favorites=None,
-                        preview_scroll=0):
-    """render the model picker overlay. row_colors, when given, is a list
+                        preview_scroll=0,
+                        preview_from_top=False):
+    """render the model picker overlay. preview_from_top flips the preview
+    pane's paging: preview_fn then returns the HEAD (first N lines) and
+    preview_scroll counts lines paged down from it, instead of up from a tail.
+    row_colors, when given, is a list
     parallel to filtered: an SGR color per row applied to non-selected,
     non-match rows (used by the agents view to tint by relationship). prices,
     when given, maps model id -> price record for the right-aligned label;
@@ -301,7 +305,10 @@ def _draw_model_overlay(rows,
         all_prev = preview_fn(filtered[selected_idx][0], prev_w - 1, want)
         if len(all_prev) < want:
             preview_scroll = max(0, len(all_prev) - visible_n)
-        preview_rows = all_prev[:visible_n]
+        if preview_from_top:
+            preview_rows = all_prev[preview_scroll:preview_scroll + visible_n]
+        else:
+            preview_rows = all_prev[:visible_n]
     else:
         preview_scroll = 0
 
@@ -691,7 +698,10 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
-        sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
+        # stay in the alternate screen: the main TUI lives there too, so
+        # leaving it would flash the terminal's primary buffer (the shell's
+        # scrollback) until the screen's restore repaints the session.
+        sys.stdout.write(CUR_HIDE)
         sys.stdout.flush()
 
     return result

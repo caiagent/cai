@@ -1001,7 +1001,10 @@ def prompt_messages_overlay(screen, messages, *,
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
-        sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
+        # stay in the alternate screen: the main TUI lives there too, so
+        # leaving it would flash the terminal's primary buffer (the shell's
+        # scrollback) until the screen's restore repaints the session.
+        sys.stdout.write(CUR_HIDE)
         sys.stdout.flush()
 
     return messages, ctx.tokens_est, ctx.modified

@@ -162,16 +162,24 @@ class SessionsRegistry:
         return paths
 
     @staticmethod
-    def session_label(path):
-        """one-line picker label: '<date>  (<n> msgs)  <first user snippet>'."""
+    def session_stamp(path):
+        """the date half of a picker label, from the file's mtime."""
         try:
-            stamp = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
         except OSError:
-            stamp = os.path.basename(path)
-        try:
-            payload = SessionsRegistry.read_flow(path)
-        except (OSError, ValueError):
-            return stamp
+            return os.path.basename(path)
+
+    @staticmethod
+    def session_label(path, payload=None):
+        """one-line picker label: '<date>  (<n> msgs)  <first user snippet>'.
+        payload is the parsed flow when the caller already holds it (the
+        sessions index reads each file once); else it is read here."""
+        stamp = SessionsRegistry.session_stamp(path)
+        if payload is None:
+            try:
+                payload = SessionsRegistry.read_flow(path)
+            except (OSError, ValueError):
+                return stamp
 
         convo = []
         for message in (payload.get("messages") or []):
@@ -181,6 +189,7 @@ class SessionsRegistry:
         first_user = ""
         for message in convo:
             if message.get("role") != "user": continue
+            if message.get("_origin"): continue      # a sub-agent report
             first_user = str(message.get("content", ""))
             break
 

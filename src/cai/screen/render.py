@@ -35,25 +35,39 @@ _PREVIEW_ROLE_COLOR = {
 }
 
 
-def _preview_lines(convo, width, max_lines):
-    """one-line-per-message preview of a conversation tail, colored by role.
-    shared by the session picker and the :agents sub-agent preview."""
+# a preview row shows one screen line of a message, so there is no point
+# flattening more of it than a very wide terminal could hold - a megabyte
+# tool result would otherwise be sanitized in full on every repaint.
+_PREVIEW_TEXT_MAX = 2000
+
+
+def _preview_line(index, msg, width, text=None):
+    """one preview row: '#<index> <role> <text>' cut to width, colored by
+    role. text, when given, replaces the message's own flat text (the session
+    search passes the excerpt around its match)."""
     from .state import _overlay_msg_text
 
+    role = msg.get('role', '?')
+    color = _PREVIEW_ROLE_COLOR.get(role, '')
+    if text is None:
+        text = _overlay_msg_text(msg)
+    text = ansi_sanitize(text[:_PREVIEW_TEXT_MAX])
+    raw = display_truncate(f'#{index} {role[:9].ljust(9)} {text}', width)
+    if color:
+        return f'{color}{raw}{SGR_RESET}'
+    return raw
+
+
+def _preview_lines(convo, width, max_lines):
+    """one-line-per-message preview of a conversation tail, colored by role.
+    the :agents sub-agent preview: a live conversation is read from its end."""
     lines = []
     tail = convo
     if len(convo) > max_lines:
         tail = convo[-max_lines:]
     for i, msg in enumerate(tail):
         abs_i = (len(convo) - len(tail)) + i
-        role = msg.get('role', '?')
-        color = _PREVIEW_ROLE_COLOR.get(role, '')
-        text = ansi_sanitize(_overlay_msg_text(msg))
-        raw = display_truncate(f'#{abs_i} {role[:9].ljust(9)} {text}', width)
-        if color:
-            lines.append(f'{color}{raw}{SGR_RESET}')
-        else:
-            lines.append(raw)
+        lines.append(_preview_line(abs_i, msg, width))
     return lines
 
 # a single display block never paints more than this many lines - a large
