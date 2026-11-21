@@ -205,8 +205,11 @@ class HooksRegistry:
                 name = getattr(fn, '__name__', repr(fn))
                 try:
                     response = fn(ctx)
-                except Exception:
+                except Exception as e:
                     log.exception("hook %r for %s raised", name, event)
+                    # the agent in ctx.data is duck-typed: only a real one reports.
+                    if hasattr(agent, "report_error"):
+                        agent.report_error(f"hook {name!r} for {event} raised: {type(e).__name__}: {e}")
                     continue
                 if response is None: continue
                 if not isinstance(response, HookResult):

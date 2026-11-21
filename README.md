@@ -140,9 +140,25 @@ carries its own reference.
 interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
 session: `:models`, `:messages`, `:history`, `:sessions`, `:save`, `:load`,
 `:tools`, `:skills`, `:pwd` (print the agent's working directory),
-`:status` (Tab: toggle a framed status window in the middle of the
+`:status` (Tab: a framed status window in the middle of the
 conversation - model, working directory, active skills and tools, live
-sub-agents, path grants, pending counts - kept current while shown),
+sub-agents, path grants, pending counts - kept current while shown; any
+key closes it),
+`:checkout` (Ctrl-W T in normal mode: branch the session - conversation,
+model, skills, tools - into a new tab, a session of its own from there on;
+`gt` / `gT` or `:tabnext` / `:tabprev` move between tabs, `:tabclose` or
+`:q` closes one, `:qa` quits with every tab; every tab keeps running in the background. as in vim,
+a tab line takes the top row only while more than one tab is open; it
+names each tab by its first prompt and marks one that is running `…`,
+waiting for an answer `?`, or finished since you last looked `+`),
+`:merge N` (as in git, merge tab N into the tab you are on: summarise what
+tab N did beyond what this tab already has - the summary streams into the
+view as it is written, and Ctrl-C cancels it - review it in your editor,
+emptying it to cancel, and take it into this tab like a prompt: a running
+tab picks it up at its next step, an idle one starts a turn on it.
+one way: tab N is then closed and you stay where you are. refused while
+tab N is running. `:merge` is a bundled extension - see *Extensions* - so
+an installed bundle registering its own `merge` replaces it),
 `:pending` (Ctrl-Q: the steers and queued prompts
 waiting behind the running turn - Ctrl-K removes one before it runs; opens
 only when something is pending), `:redraw` (repaint the view from the
@@ -160,6 +176,14 @@ conversation plus the settings needed to resume it.
 The TUI reads keys from stdin whenever stdin is a terminal; `/dev/tty` is
 opened only behind a piped stdin (`git diff | cai -i`), so a sandbox that
 passes a pty on stdin but has no reachable `/dev/tty` still runs it.
+
+Wherever the TUI opens an editor it runs `$VISUAL`, else `$EDITOR`, else the
+first of nvim / vim / vi / nano installed. The value is a command line
+(`EDITOR="emacs -nw"`); cai appends the file and waits for the editor to exit.
+For the editors it knows - vim, nvim, nano, emacs, helix, kakoune, micro, VS
+Code and its forks, Sublime Text, Zed, TextMate, gedit, kate - it also adds
+the editor's own flags for waiting until the file is closed, read-only views
+and opening at the cursor, so `EDITOR=code` works as is.
 
 ## Skills, tools, sub-agents
 
@@ -239,6 +263,23 @@ An extension is a self-contained bundle directory carrying any of
 commands, slots and renderers through the `cai.*` decorators. Installing drops it under
 `~/.config/cai/extensions/<name>/`, where `Environment.load()` discovers it.
 
+A command's handler gets a `cai.CommandContext`, laid out the way the TUI
+is: `ctx.args`, `ctx.tab` - the tab the command was typed in - and
+`ctx.tabs`, all the open ones. A `cai.Tab` has its own `client` (that tab's
+agent, over the wire) and `screen` (its view), its `number`, `busy`, and
+`call_soon(fn)`, which runs `fn` on the main thread the next time that tab
+is in front (how a background thread gets to open the editor). `ctx.client`
+and `ctx.screen` are short for `ctx.tab.client` and `ctx.tab.screen`.
+`ctx.tabs.at(N)` is the tab numbered N on the tab line, iterating gives them
+all, and `ctx.tabs.close(tab)` closes one. `@cai.command(takes_arg=True)` makes the
+palette pre-fill the command instead of running it; `idle=True` refuses it
+while the agent is running.
+
+cai ships extensions of its own in `src/cai/builtins/extensions/`, loaded
+before the installed ones (so yours win on a name clash) and not managed by
+`cai extend`. `:merge` is one: `builtins/extensions/merge/init.py` is the
+worked example of a command that spans two tabs.
+
 ```sh
 cai extend ./my-bundle              # install a folder, .zip, or http(s) URL
 cai extend --list
@@ -261,7 +302,7 @@ mutation to an example):
 - `focus` — a `before_turn` hook narrowing the tool selection.
 - `compact` — context compaction as a `:compact` command plus an `after_turn`
   auto-compact hook, in one `init.py`.
-- `clone` — `:clone`, a session checkpoint: save the session, then swap the
+- `checkpoint` — `:checkpoint`, a session checkpoint: save the session, then swap the
   served agent for a fresh branch of itself and keep going.
 - `summarize` — `:summarize`, branch and continue reduced: checkpoint, branch,
   and carry forward only a one-message summary of the session.

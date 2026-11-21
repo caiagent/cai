@@ -7,12 +7,7 @@ user sees live progress and the model's workings instead of a frozen screen.
 """
 
 import json
-import select
-import shutil
-import signal
 import sys
-import termios
-import tty
 
 from ..ansi import (
     ALT_ENTER,
@@ -23,7 +18,7 @@ from ..ansi import (
     ansi_pad, wrap_ansi,
     cur_move,
 )
-from ..input import read_key
+from .frame import OverlayFrame
 
 
 class StreamState:
@@ -31,7 +26,7 @@ class StreamState:
         'title', 'header', 'n_selected',
         'content', 'reasoning', 'tool_calls',
         'status', 'status_color',
-        'resize_pending', 'first_draw', 'prev_lines',
+        'first_draw', 'prev_lines',
     )
 
     def __init__(self, title, header, n_selected):
@@ -43,7 +38,6 @@ class StreamState:
         self.tool_calls = []
         self.status = 'connecting...'
         self.status_color = SGR_DIM_GRAY
-        self.resize_pending = False
         self.first_draw = True
         self.prev_lines = {}
 
@@ -191,22 +185,14 @@ def run_streaming_transform(screen, fn, name, selected, kwargs, *, header=''):
     """
     state = StreamState(f'{name}', header or name, len(selected))
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
-
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        state.resize_pending = True
-        state.first_draw = True
+    frame = OverlayFrame(screen)
 
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
 
     result = None
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         state.status = 'waiting for model...'
         state.status_color = SGR_YELLOW
         _draw(screen, state)
@@ -215,8 +201,8 @@ def run_streaming_transform(screen, fn, name, selected, kwargs, *, header=''):
             # SIGWINCH in raw mode still fires while we're inside the HTTP
             # read; pick it up on the next event so the popup resizes
             # without needing input events.
-            if state.resize_pending:
-                state.resize_pending = False
+            if frame.resized():
+                state.first_draw = True
             if reasoning:
                 state.reasoning.append(reasoning)
             if content:
@@ -255,16 +241,13 @@ def run_streaming_transform(screen, fn, name, selected, kwargs, *, header=''):
         _draw(screen, state)
 
         while True:
-            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.1)
-            if rlist:
-                read_key(screen._tty_fd)
+            if frame.read_key(0.1) is not None:
                 break
-            if state.resize_pending:
-                state.resize_pending = False
+            if frame.resized():
+                state.first_draw = True
                 _draw(screen, state)
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

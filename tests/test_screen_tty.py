@@ -119,3 +119,38 @@ def test_close_leaves_an_inherited_fd_open(streams, dev_tty, monkeypatch):
     screen = Screen()
     assert screen._tty_file is None and screen._tty_fd == 0
     screen.close()   # nothing to close; must not raise
+
+
+def test_quiet_mode_keeps_typed_ahead_keys_without_echoing_them():
+    # between two prompt() calls the main thread can be busy for seconds (a
+    # command loading tools); what is typed meanwhile must neither be echoed
+    # over the screen nor line-edited - it waits for the next prompt().
+    import os
+    import pty
+    import termios
+
+    master, slave = pty.openpty()
+    try:
+        cooked = termios.tcgetattr(slave)
+        quiet = Screen._quiet_from(cooked)
+        assert cooked[3] & termios.ECHO and cooked[3] & termios.ICANON
+        assert not quiet[3] & termios.ECHO and not quiet[3] & termios.ICANON
+        assert quiet[3] & termios.ISIG                     # Ctrl-C still interrupts
+        assert not quiet[0] & termios.ICRNL                # Enter stays '\r', as in raw mode
+        termios.tcsetattr(slave, termios.TCSADRAIN, quiet)
+        os.write(master, b"typed\r")
+        assert os.read(slave, 64) == b"typed\r"            # no newline needed, nothing rewritten
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_prompt_leaves_quiet_mode_unless_it_was_nested_in_a_raw_one():
+    import termios
+
+    screen = Screen.__new__(Screen)
+    screen._quiet_attrs = ["quiet"]
+    cooked = [0, 0, 0, termios.ISIG | termios.ECHO | termios.ICANON, 0, 0, []]
+    raw = [0, 0, 0, 0, 0, 0, []]
+    assert screen._attrs_after_prompt(cooked) == ["quiet"]
+    assert screen._attrs_after_prompt(raw) is raw

@@ -8,7 +8,7 @@ from .ansi import (
     SGR_AZURE_ON_DGRAY, SGR_BOLD_AZURE, SGR_REVERSE_YELLOW,
     CUR_HIDE, CUR_SHOW, CURSOR_BLOCK,
     ERASE_LINE, ERASE_SCREEN,
-    cur_move, ansi_strip, wrap_ansi, display_width,
+    cur_move, ansi_strip, wrap_ansi, display_width, display_truncate,
 )
 from .state import Mode
 
@@ -75,6 +75,11 @@ class Layout:
         # render only emits the rows whose payload differs, so a streamed
         # token repaints one row, not the whole screen.
         self._painted = {}
+        # the tab line: None (no row taken), or the (text, sgr) cells of the
+        # one row painted above the conversation, plus the sgr its unused
+        # width is filled with. set_tabline owns both.
+        self._tabline = None
+        self._tabline_fill = ''
 
     @property
     def rows(self):
@@ -87,7 +92,37 @@ class Layout:
     @property
     def content_rows(self):
         """number of rows for the conversation content viewport."""
-        return max(1, self._rows - 1 - self._input_height)
+        return max(1, self._rows - 1 - self._input_height - self.content_top)
+
+    @property
+    def content_top(self):
+        """terminal rows above the conversation viewport: 1 while the tab
+        line shows, else 0. viewport row v is terminal row v + 1 + this."""
+        if self._tabline is None: return 0
+        return 1
+
+    def set_tabline(self, cells, fill=''):
+        """show the tab line - cells is its (text, sgr) segments, left to
+        right, fill the sgr for the rest of the row - or hide it with None.
+        returns True when that changed the viewport's height."""
+        before = self.content_top
+        self._tabline = cells
+        self._tabline_fill = fill
+        return self.content_top != before
+
+    def _tabline_text(self, cols):
+        """the tab line as one styled row exactly cols wide: segments that
+        do not fit are cut, the remainder is filled."""
+        parts = []
+        used = 0
+        for text, sgr in self._tabline:
+            room = cols - used
+            if room <= 0: break
+            text = display_truncate(text, room)
+            used += display_width(text)
+            parts.append(f'{sgr}{text}{SGR_RESET}')
+        parts.append(f'{self._tabline_fill}{" " * (cols - used)}')
+        return ''.join(parts)
 
     @property
     def status_row(self):
@@ -181,6 +216,9 @@ class Layout:
                 text = ansi_strip(text)[:cols - col]
             widget_cells.setdefault(vrow, []).append((col + 1, text))
         out = []
+        top = self.content_top
+        if self._tabline is not None:
+            self._paint_row(out, 1, self._tabline_text(cols), cols)
         sel_sr = 0
         sel_er = 0
         sel_sc = 0
@@ -226,7 +264,7 @@ class Layout:
                     # middle lines: fully highlighted
                     line = SGR_REVERSE + plain + SGR_RESET
 
-            self._paint_row(out, vrow + 1, line, cols, widget_cells.get(vrow, ()))
+            self._paint_row(out, vrow + 1 + top, line, cols, widget_cells.get(vrow, ()))
         sys.stdout.write(''.join(out))
 
     def render_status(self,
@@ -402,7 +440,7 @@ class Layout:
         erase from its widget."""
         out = []
         for vrow, col, text in self._widget_cells(lines, cols):
-            out.append(cur_move(vrow + 1, col))
+            out.append(cur_move(vrow + 1 + self.content_top, col))
             out.append(text)
             out.append(SGR_RESET)
         sys.stdout.write(''.join(out))
@@ -416,7 +454,7 @@ class Layout:
         if mode in (Mode.NORMAL, Mode.VISUAL, Mode.VISUAL_LINE):
             vrow = cursor_row - viewport_offset
             if 0 <= vrow < self.content_rows:
-                sys.stdout.write(cur_move(vrow + 1, min(cursor_col + 1, self._cols)))
+                sys.stdout.write(cur_move(vrow + 1 + self.content_top, min(cursor_col + 1, self._cols)))
             sys.stdout.write(CURSOR_BLOCK + CUR_SHOW)
 
     def render_all(self,

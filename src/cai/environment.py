@@ -45,6 +45,7 @@ import os
 import sys
 import hashlib
 import logging
+import threading
 import importlib.util
 from dataclasses import dataclass
 from dataclasses import field
@@ -134,35 +135,57 @@ def builtin_mcp_dir():
     return os.path.join(os.path.dirname(__file__), "builtins", "mcps")
 
 
-def list_extensions():
-    """the extension bundles under ~/.config/cai/extensions/, sorted by name.
-    a filesystem scan only - no extension Python is run."""
+def builtin_extensions_dir():
+    """the extensions shipped with cai, in builtins/extensions/ inside the
+    package - loaded before the installed ones, so an installed bundle (or
+    init.py) registering the same command or hook name wins."""
+    return os.path.join(os.path.dirname(__file__), "builtins", "extensions")
+
+
+def _scan_extensions(directory):
+    """the bundle directories under `directory`, sorted by name."""
     extensions = []
     try:
-        entries = sorted(os.listdir(extensions_dir()))
+        entries = sorted(os.listdir(directory))
     except OSError:
         return extensions
     for name in entries:
-        path = os.path.join(extensions_dir(), name)
+        if name.startswith((".", "_")): continue
+        path = os.path.join(directory, name)
         if not os.path.isdir(path): continue
         extensions.append(Extension(name=name, path=path))
     return extensions
 
 
-def _import_file(path):
+def list_extensions():
+    """the extension bundles under ~/.config/cai/extensions/, sorted by name.
+    a filesystem scan only - no extension Python is run."""
+    return _scan_extensions(extensions_dir())
+
+
+def builtin_extensions():
+    """the extension bundles shipped with cai (builtins/extensions/), sorted
+    by name. they are not installed bundles: `cai extend` neither lists nor
+    removes them."""
+    return _scan_extensions(builtin_extensions_dir())
+
+
+def _import_file(path, fresh=False):
     if not os.path.exists(path):
         return
-    _load_module(path)
+    _load_module(path, fresh=fresh)
 
 
-def _load_module(path):
+def _load_module(path, fresh=False):
     """load a bundle file as a package whose search path is its own directory,
     so it can `from . import helper` a sibling file, and cache it in
     sys.modules so its body (and the cai.hook / cai.command registrations)
-    runs once per process. None (logged) on failure."""
+    runs once per process. fresh runs the body again whatever is cached -
+    the shipped bundles, which every env that load()s must get. None (logged)
+    on failure."""
     name = _module_name(path)
     cached = sys.modules.get(name)
-    if cached is not None:
+    if cached is not None and not fresh:
         return cached
     try:
         spec = importlib.util.spec_from_file_location(
@@ -173,9 +196,10 @@ def _load_module(path):
         sys.modules[name] = module
         spec.loader.exec_module(module)
         return module
-    except Exception:
+    except Exception as e:
         sys.modules.pop(name, None)
         log.exception("environment: failed loading %s", path)
+        Environment.target().report_error(f"failed loading {path}: {type(e).__name__}: {e}")
         return None
 
 
@@ -217,6 +241,10 @@ def _python_tools(agent):
     return python_tools(agent)
 
 
+# how many undrained errors an Environment keeps (the newest ones).
+_ERRORS_KEPT = 50
+
+
 class Environment:
     """one install catalogue: extensions, function tools, declared MCP servers,
     hooks, commands, and the live Settings. see the module docstring for how
@@ -244,6 +272,32 @@ class Environment:
         # for the top-level init.py, or None outside a load. register_tool
         # reads it to namespace extension tools.
         self._loading_extension = None
+        # errors recovered from without raising (an extension that failed to
+        # import, a tool or skill that failed to load, a hook that raised)
+        # that nobody has shown yet, oldest first: this is how a front end
+        # (the TUI) gets to tell the user. capped, for a host that never
+        # drains it.
+        self._errors = []
+        self._errors_lock = threading.Lock()
+
+    def report_error(self, message):
+        """log an error that was recovered from and keep it for
+        drain_errors. one still waiting to be drained is not queued twice,
+        so a failure that repeats (a hook raising every turn) shows once per
+        drain rather than flooding."""
+        log.error("%s", message)
+        with self._errors_lock:
+            if message in self._errors: return
+            self._errors.append(message)
+            del self._errors[:-_ERRORS_KEPT]
+
+    def drain_errors(self):
+        """the errors reported since the last call, oldest first; draining
+        clears them, so each is shown once."""
+        with self._errors_lock:
+            errors = self._errors
+            self._errors = []
+        return errors
 
     @classmethod
     def default(cls):
@@ -275,7 +329,8 @@ class Environment:
         return merged
 
     def load(self):
-        """discover the extensions and import their Python (alphabetical) then
+        """import the shipped extensions' Python (builtins/extensions/), then
+        discover the installed extensions and import theirs (alphabetical), then
         the user's top-level init.py, all registering into this env: while the
         imports run this env is Environment.target(), so the cai.hook /
         cai.command / cai.tool / cai.mcp_server decorators and cai.settings land
@@ -284,6 +339,9 @@ class Environment:
         previous = Environment._loading
         Environment._loading = self
         try:
+            for extension in builtin_extensions():
+                self._loading_extension = extension.name
+                _import_file(extension.init_file, fresh=True)
             for extension in self.extensions:
                 self._loading_extension = extension.name
                 _import_file(extension.init_file)
@@ -480,7 +538,7 @@ class Environment:
                 for tool in server.list_tools():
                     names.append(f"{label}__{tool['name']}")
             except Exception as e:
-                log.error("available_tools: declared server %r failed: %s", label, e)
+                self.report_error(f"MCP server {label!r} failed listing its tools: {e}")
             finally:
                 if server is not None:
                     server.close()
@@ -499,7 +557,7 @@ class Environment:
                     for tool in server.list_tools():
                         names.append(f"{label}__{tool['name']}")
                 except Exception as e:
-                    log.error("available_tools: %r failed: %s", path, e)
+                    self.report_error(f"MCP server {path} failed listing its tools: {e}")
                 finally:
                     if server is not None:
                         server.close()

@@ -9,10 +9,6 @@ import ast
 import copy
 import json
 import os
-import select
-import shutil
-import signal
-import subprocess
 import sys
 import tempfile
 import termios
@@ -37,7 +33,8 @@ from ..state import (
     _overlay_find_matches, _overlay_sync_search_cursor,
     _overlay_apply_filter, _overlay_recompute_tokens,
 )
-from ..input import read_key, parse_mouse, editor_argv
+from ..input import parse_mouse, run_editor
+from .frame import OverlayFrame
 
 
 # how often a live overlay asks the host whether the turn appended - a socket
@@ -406,7 +403,7 @@ def _reenter_overlay(ctx, screen):
     """re-enter the overlay's alt-screen + raw mode after a sub-popup."""
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
-    tty.setraw(screen._tty_fd)
+    tty.setraw(screen._tty_fd, termios.TCSADRAIN)
     ctx.first_draw = True
 
 
@@ -826,7 +823,7 @@ def _edit_in_editor(ctx, screen):
         sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
         sys.stdout.flush()
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, screen._cooked_attrs)
-        subprocess.run(editor_argv(tmp))
+        run_editor(tmp)
         with open(tmp, 'r') as f:
             new_text = f.read()
 
@@ -882,7 +879,7 @@ def _edit_in_editor(ctx, screen):
             pass
         sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
         sys.stdout.flush()
-        tty.setraw(screen._tty_fd)
+        tty.setraw(screen._tty_fd, termios.TCSADRAIN)
         ctx.first_draw = True
 
 
@@ -905,14 +902,7 @@ def prompt_messages_overlay(screen, messages, *,
                          sample_chars=sample_chars)
     ctx.readonly = readonly
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
-
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        ctx.resize_pending = True
-        ctx.first_draw = True
+    frame = OverlayFrame(screen)
 
     # live refresh: the host bumps a mutation counter (over the socket) each
     # time a turn appends under us. revision() reads it; the tick loop polls
@@ -927,13 +917,12 @@ def prompt_messages_overlay(screen, messages, *,
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         overlay_redraw(ctx, screen._rows, screen._cols)
 
         while True:
-            if ctx.resize_pending:
-                ctx.resize_pending = False
+            if frame.resized():
+                ctx.first_draw = True
                 overlay_redraw(ctx, screen._rows, screen._cols)
 
             if revision is not None and time.monotonic() - last_poll >= _POLL_INTERVAL:
@@ -949,10 +938,9 @@ def prompt_messages_overlay(screen, messages, *,
                 _refresh_view_after_external_mutation(ctx)
                 overlay_redraw(ctx, screen._rows, screen._cols)
 
-            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
-            if not rlist:
+            key = frame.read_key()
+            if key is None:
                 continue
-            key = read_key(screen._tty_fd)
 
             mouse = parse_mouse(key)
             if mouse is not None:
@@ -999,8 +987,7 @@ def prompt_messages_overlay(screen, messages, *,
             overlay_redraw(ctx, screen._rows, screen._cols)
 
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

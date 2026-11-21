@@ -17,14 +17,14 @@ from cai.wired_agent import UnixWiredAgent
 class FakeScreen:
     def __init__(self):
         self.writes = []
-        self._busy = False
+        self.busy = False
         self.busy_log = []
 
     def write(self, text, kind=None, block=False):
         self.writes.append((text, kind))
 
     def set_busy(self, busy):
-        self._busy = busy
+        self.busy = busy
         self.busy_log.append(busy)
 
     def submit_request(self, request):

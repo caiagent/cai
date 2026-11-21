@@ -26,12 +26,7 @@ undo       : u reverts the last change
 close      : esc / q"""
 
 import re
-import select
-import shutil
-import signal
 import sys
-import termios
-import tty
 from dataclasses import dataclass
 from dataclasses import field
 
@@ -45,7 +40,8 @@ from ..ansi import (
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
     KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
 )
-from ..input import read_key, parse_mouse
+from ..input import parse_mouse
+from .frame import OverlayFrame
 
 
 BOOL = 'bool'
@@ -347,13 +343,6 @@ def prompt_config_overlay(screen, settings):
 
     prev_lines = {}
     first_draw = [True]
-    resize_pending = [False]
-
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        resize_pending[0] = True
-        first_draw[0] = True
 
     def _redraw():
         _draw(screen._rows, screen._cols,
@@ -364,26 +353,23 @@ def prompt_config_overlay(screen, settings):
               prev_lines, first_draw[0])
         first_draw[0] = False
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
+    frame = OverlayFrame(screen)
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
 
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         _redraw()
 
         prev_key = ''
         while True:
-            if resize_pending[0]:
-                resize_pending[0] = False
+            if frame.resized():
+                first_draw[0] = True
                 _redraw()
 
-            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
-            if not rlist:
+            key = frame.read_key()
+            if key is None:
                 continue
-            key = read_key(screen._tty_fd)
 
             mouse = parse_mouse(key)
             if mouse is not None:
@@ -582,8 +568,7 @@ def prompt_config_overlay(screen, settings):
                 continue
 
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

@@ -1,4 +1,4 @@
-"""init.py - example extension: session checkpoints (:clone).
+"""init.py - example extension: session checkpoints (:checkpoint).
 
 Saves the session to its .flow file - the checkpoint - then swaps the served
 agent for a fresh branch of itself over the 'clone' control op. The socket,
@@ -15,7 +15,7 @@ import cai
 
 
 @cai.command(help="checkpoint the session and continue on a fresh branch")
-def clone(ctx: cai.CommandContext):
+def checkpoint(ctx: cai.CommandContext):
     """Checkpoint the session, then continue on a fresh branch of it."""
     saved = ctx.client.save(None)
     if not saved:

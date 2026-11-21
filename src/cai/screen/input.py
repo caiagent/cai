@@ -3,6 +3,7 @@
 import os
 import select
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -187,25 +188,128 @@ def history_navigate(direction, history, history_idx, input_buf, cursor_pos):
     return history_idx, input_buf, cursor_pos
 
 
+# what cai knows about an editor beyond "run it on a path and wait for it to
+# exit" - the contract $EDITOR has everywhere (git, ranger, crontab -e). the
+# keys are program basenames; an editor not listed just gets the path.
+#   wait:     flags of which one must be present for the command to block
+#             until the file is closed (a GUI editor returns at once without
+#             it); the first is added when the user's command has none.
+#   readonly: flags that open the file read-only.
+#   goto:     arguments that open `path` at row / col (both 1-based), with
+#             the path among them; without it the path is simply appended.
+#   window:   the editor opens in a window of its own, so the terminal has
+#             nothing to show while it runs.
+_VIM = {'readonly': ['-R'], 'goto': ['+{row}', '+normal! {col}|', '{path}']}
+_GVIM = dict(_VIM, wait=['-f', '--nofork'], window=True)
+_VSCODE = {'wait': ['--wait', '-w'], 'goto': ['--goto', '{path}:{row}:{col}'], 'window': True}
+_PATH_ROW_COL = ['{path}:{row}:{col}']
+_PLUS_ROW_COL = ['+{row}:{col}', '{path}']
+_EDITORS = {
+    'vi': _VIM, 'vim': _VIM, 'nvim': _VIM, 'view': _VIM,
+    'gvim': _GVIM, 'mvim': _GVIM,
+    'nano': {'readonly': ['-v'], 'goto': ['+{row},{col}', '{path}']},
+    'emacs': {'goto': _PLUS_ROW_COL},
+    'emacsclient': {'goto': _PLUS_ROW_COL},
+    'hx': {'goto': _PATH_ROW_COL},
+    'helix': {'goto': _PATH_ROW_COL},
+    'kak': {'readonly': ['-ro'], 'goto': _PLUS_ROW_COL},
+    'micro': {'readonly': ['-readonly', 'true'], 'goto': _PLUS_ROW_COL},
+    'code': _VSCODE, 'code-insiders': _VSCODE, 'codium': _VSCODE,
+    'cursor': _VSCODE, 'windsurf': _VSCODE,
+    'subl': {'wait': ['--wait', '-w'], 'goto': _PATH_ROW_COL, 'window': True},
+    'sublime_text': {'wait': ['--wait', '-w'], 'goto': _PATH_ROW_COL, 'window': True},
+    'zed': {'wait': ['--wait', '-w'], 'goto': _PATH_ROW_COL, 'window': True},
+    'mate': {'wait': ['-w', '--wait'], 'goto': ['-l', '{row}:{col}', '{path}'], 'window': True},
+    'gedit': {'wait': ['--wait', '-w', '-s', '--standalone'], 'goto': _PLUS_ROW_COL, 'window': True},
+    'kate': {'wait': ['--block', '-b'], 'goto': ['-l', '{row}', '-c', '{col}', '{path}'],
+             'window': True},
+}
+
+# tried in order when neither $VISUAL nor $EDITOR is set.
+_FALLBACK_EDITORS = ('nvim', 'vim', 'vi', 'nano')
+
+
+def _editor_command():
+    """the user's editor as an argv prefix: $VISUAL, then $EDITOR (the order
+    git and most tools use), split like a shell would so 'code --wait' or a
+    quoted path works; without either, the first fallback editor installed."""
+    for variable in ('VISUAL', 'EDITOR'):
+        value = os.environ.get(variable, '').strip()
+        if not value: continue
+        try:
+            argv = shlex.split(value)
+        except ValueError:
+            argv = value.split()
+        if argv:
+            return argv
+    for name in _FALLBACK_EDITORS:
+        if shutil.which(name):
+            return [name]
+    return ['vi']
+
+
+def _editor_traits(argv):
+    """the _EDITORS entry for the program an editor argv runs ({} for one
+    cai does not know). matched on the basename, without a Windows '.exe'."""
+    name = os.path.basename(argv[0]).lower()
+    for ending in ('.exe', '.cmd', '.bat'):
+        if name.endswith(ending):
+            name = name[:-len(ending)]
+            break
+    return _EDITORS.get(name, {})
+
+
 def editor_argv(path, *, readonly=False, row=None, col=None):
-    """build the command line for the user's editor: $EDITOR if set, nvim
-    otherwise. read-only mode and cursor positioning are vim flags, so they
-    are only added when the editor is vim-family; anything else just gets
-    the path."""
-    editor = os.environ.get('EDITOR', '').strip()
-    if not editor:
-        editor = 'nvim'
-    argv = shlex.split(editor)
-    name = os.path.basename(argv[0])
-    if name in ('vi', 'vim', 'nvim', 'gvim'):
-        if readonly:
-            argv.append('-R')
-        if row is not None:
-            # +line positions the cursor; 'normal! N|' moves to column N.
-            argv.append(f'+{row}')
-            argv.append(f'+normal! {col}|')
-    argv.append(path)
+    """build the command line that opens `path` in the user's editor and
+    blocks until it is closed. the editor's own flags for waiting, read-only
+    and cursor position (row / col, 1-based) are added when cai knows the
+    editor (see _EDITORS); any other editor just gets the path."""
+    argv = _editor_command()
+    traits = _editor_traits(argv)
+    wait = traits.get('wait')
+    if wait:
+        given = False
+        for flag in wait:
+            if flag in argv[1:]:
+                given = True
+                break
+        if not given:
+            argv.append(wait[0])
+    if readonly:
+        argv.extend(traits.get('readonly', []))
+    goto = traits.get('goto')
+    if row is None or not goto:
+        argv.append(path)
+        return argv
+    if col is None:
+        col = 1
+    for part in goto:
+        argv.append(part.format(path=path, row=row, col=col))
     return argv
+
+
+def run_editor(path, *, readonly=False, row=None, col=None):
+    """open `path` in the user's editor and wait for it to be closed; the
+    file on disk is the result. the terminal must be in cooked mode. an
+    editor with a window of its own leaves the terminal empty meanwhile, so
+    a line says what is being waited for; one that cannot be started is
+    reported and held on screen until Enter. returns whether the editor ran."""
+    argv = editor_argv(path, readonly=readonly, row=row, col=col)
+    if _editor_traits(argv).get('window'):
+        sys.stdout.write(f'\r\nwaiting for {argv[0]} - close the file there to come back...\r\n')
+        sys.stdout.flush()
+    try:
+        subprocess.run(argv)
+    except OSError as e:
+        sys.stdout.write(f'\r\ncould not run the editor {argv[0]!r}: {e}\r\n'
+                         'set $VISUAL or $EDITOR to your editor\'s command. press Enter...')
+        sys.stdout.flush()
+        try:
+            os.read(sys.stdin.fileno(), 1024)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def open_in_editor(tty_fd, cooked_attrs, buf):
@@ -218,7 +322,7 @@ def open_in_editor(tty_fd, cooked_attrs, buf):
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, cooked_attrs)
         sys.stdout.write(CUR_SHOW)
         sys.stdout.flush()
-        subprocess.run(editor_argv(tmp))
+        run_editor(tmp)
         tty.setraw(tty_fd)
         with open(tmp, 'r') as f:
             new_content = f.read().rstrip('\n')
@@ -241,7 +345,7 @@ def open_buffer_in_editor(tty_fd, cooked_attrs, lines, cursor_row, cursor_col):
         sys.stdout.write(ALT_EXIT + CUR_SHOW)
         sys.stdout.flush()
         # cursor_row is 0-based, vim is 1-based
-        subprocess.run(editor_argv(tmp, row=cursor_row + 1, col=cursor_col + 1))
+        run_editor(tmp, row=cursor_row + 1, col=cursor_col + 1)
     finally:
         try:
             os.unlink(tmp)

@@ -6,12 +6,7 @@ subsequence fuzzy match used by the model picker. Returns the selected
 command name, or None on cancel.
 """
 
-import select
-import shutil
-import signal
 import sys
-import termios
-import tty
 
 from ..ansi import (
     ALT_ENTER,
@@ -22,7 +17,8 @@ from ..ansi import (
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
     KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN,
 )
-from ..input import read_key, parse_mouse
+from ..input import parse_mouse
+from .frame import OverlayFrame
 
 
 def _fuzzy_match(pattern, text):
@@ -194,37 +190,27 @@ def prompt_palette_overlay(screen, commands):
     selected = 0
     prev_lines = {}
     first_draw = [True]
-    resize_pending = [False]
-
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        resize_pending[0] = True
-        first_draw[0] = True
 
     def _redraw():
         _draw(screen._rows, screen._cols, filtered, selected, search_buf,
               len(commands), prev_lines, first_draw[0])
         first_draw[0] = False
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
+    frame = OverlayFrame(screen)
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
 
     result = None
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         _redraw()
         while True:
-            if resize_pending[0]:
-                resize_pending[0] = False
+            if frame.resized():
+                first_draw[0] = True
                 _redraw()
-            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
-            if not rlist:
+            key = frame.read_key()
+            if key is None:
                 continue
-            key = read_key(screen._tty_fd)
 
             mouse = parse_mouse(key)
             if mouse is not None:
@@ -273,8 +259,7 @@ def prompt_palette_overlay(screen, commands):
                 _redraw()
                 continue
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

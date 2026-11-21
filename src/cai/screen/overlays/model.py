@@ -1,11 +1,6 @@
 """Interactive model picker overlay (alternate screen, fuzzy finder)."""
 
-import select
-import shutil
-import signal
 import sys
-import termios
-import tty
 
 from ..ansi import (
     ALT_ENTER,
@@ -17,7 +12,8 @@ from ..ansi import (
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
     KEY_CTRL_D, KEY_CTRL_U, KEY_TAB, KEY_UP, KEY_DOWN,
 )
-from ..input import read_key, parse_mouse
+from ..input import parse_mouse
+from .frame import OverlayFrame
 from ..togglelist import _find_matches, _handle_search_key, _style_cell
 from ...models import load_favorites, toggle_favorite
 
@@ -475,7 +471,6 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     selected_idx = 0
     prev_lines = {}
     first_draw = [True]
-    resize_pending = [False]
 
     # navigate-mode state (unused in fuzzy mode)
     search_mode = False
@@ -485,12 +480,6 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     search_match_idx = -1
     pre_search_idx = 0
     prev_key = ''
-
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        resize_pending[0] = True
-        first_draw[0] = True
 
     def _redraw():
         fav_arg = None
@@ -507,26 +496,23 @@ def prompt_model_overlay(screen, models, *, presorted=False,
         )
         first_draw[0] = False
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
+    frame = OverlayFrame(screen)
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
 
     result = None
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         _redraw()
 
         while True:
-            if resize_pending[0]:
-                resize_pending[0] = False
+            if frame.resized():
+                first_draw[0] = True
                 _redraw()
 
-            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
-            if not rlist:
+            key = frame.read_key()
+            if key is None:
                 continue
-            key = read_key(screen._tty_fd)
 
             mouse = parse_mouse(key)
             if mouse is not None:
@@ -696,8 +682,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
                 continue
 
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

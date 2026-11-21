@@ -558,6 +558,8 @@ class WiredAgent:
         if op == "set_selected_tools":
             agent.set_selected_tools(value)
             return True, None, None
+        if op == "drain_errors":
+            return True, agent.drain_errors(), None
         if op == "set_model":
             agent.set_model(value)
             return True, None, None

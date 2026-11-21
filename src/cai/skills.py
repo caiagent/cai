@@ -236,7 +236,7 @@ class SkillsRegistry:
         stays in names() (mirroring set_skills's input)."""
         skill = _read_skill(name, self.env.skill_dirs())
         if skill is None:
-            log.warning("skill %r not found", name)
+            self.tools_registry.report_error(f"skill {name!r} not found")
             return
         # foundation first: activate everything this skill builds on, then it.
         for used in skill.skills:
@@ -249,7 +249,7 @@ class SkillsRegistry:
             try:
                 self.tools_registry.select(tool_name)
             except ValueError as e:
-                log.error("skill %r: bad tool %r: %s", name, tool_name, e)
+                self.tools_registry.report_error(f"skill {name!r}: bad tool {tool_name!r}: {e}")
         self._skills[name] = skill
 
     def remove(self, name):
@@ -306,12 +306,14 @@ class SkillsRegistry:
                 return _allowed_paths_slot()
             filler = self.env.slot(name)
             if filler is None:
-                log.warning("skill %r: no slot filler for {{%s}}", skill_name, name)
+                self.tools_registry.report_error(f"skill {skill_name!r}: no slot filler for {{{{{name}}}}}")
                 return ""
             try:
                 result = filler(SlotContext(agent=self.agent, skill=skill_name))
-            except Exception:
+            except Exception as e:
                 log.exception("skill %r: slot %r raised", skill_name, name)
+                self.tools_registry.report_error(
+                    f"skill {skill_name!r}: slot {name!r} raised: {type(e).__name__}: {e}")
                 return f"[slot {name!r} failed]"
             if result is None:
                 return ""

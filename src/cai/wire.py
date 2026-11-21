@@ -27,7 +27,9 @@ remote agent:
 
 The control ops are get_info, get_messages/set_messages, set_model,
 get_selected_skills/get_available_skills/set_selected_skills, get_skill_tools
-(which active skill declares which tools), and the matching tools trio. PROMPT carries a UI request (confirm/select/text, or a
+(which active skill declares which tools), the matching tools trio, and
+drain_errors (the errors the agent recovered from and has not reported yet,
+e.g. a tool that failed to load; reading clears them). PROMPT carries a UI request (confirm/select/text, or a
 one-way notify) that a hook raised mid-run via HookContext.ui; the client
 answers with a REPLY (none for notify). Everything is synchronous: the agent
 handles one message fully before the next, and a blocked prompt reads the

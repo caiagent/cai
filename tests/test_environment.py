@@ -37,7 +37,7 @@ def test_no_extensions_dir_registers_nothing():
     env = Environment().load()
     assert env.extensions == []
     assert env.hooks() == []
-    assert env.commands() == {}
+    assert sorted(env.commands()) == ["merge"]      # what cai ships (builtins/extensions)
     assert env.function_tools() == {}
 
 

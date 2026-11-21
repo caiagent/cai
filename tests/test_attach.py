@@ -79,7 +79,7 @@ class _OverlayScreen:
     more turn through the driver wire and drains the broadcast into the view
     until the streamed answer shows."""
 
-    _cols = 80
+    cols = 80
 
     def __init__(self, driver, answer):
         self._driver = driver

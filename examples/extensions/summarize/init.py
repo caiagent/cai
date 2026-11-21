@@ -6,7 +6,7 @@ a single summary of everything so far - one LLM call, one swap. You continue
 in a near-empty context that still knows what happened; the full session
 stays frozen in the checkpoint, back via :sessions (or :load <path>).
 
-The same seam as examples/extensions/clone - save + clone - with the branch's
+The same seam as examples/extensions/checkpoint - save + clone - with the branch's
 conversation specified in the clone's spec ({'messages': [seed]}): a key
 present in the spec overrides, an absent one inherits. The summary is made
 BEFORE the swap so a failed LLM call leaves the session untouched."""

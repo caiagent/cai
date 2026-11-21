@@ -7,7 +7,7 @@ keep working in a near-empty context that still knows what happened; the full
 session stays frozen in the checkpoint, back via `:sessions` (or
 `:load <path>`).
 
-Where `:compact` folds the middle of a conversation in place and `:clone`
+Where `:compact` folds the middle of a conversation in place and `:checkpoint`
 branches it whole, `:summarize` branches it *reduced* — the shape for long
 research sessions: checkpoint the detail, carry only the briefing forward.
 
@@ -29,7 +29,7 @@ Start cai: `:summarize` tab-completes after `:` and is in the Ctrl-P palette.
 
 ## How it works
 
-The branch-and-continue seam from `examples/extensions/clone`, with the
+The branch-and-continue seam from `examples/extensions/checkpoint`, with the
 branch shaped in the clone's spec:
 
 - `_summarize(...)` — one throwaway `cai.Run` turns the conversation into a

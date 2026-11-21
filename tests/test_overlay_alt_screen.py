@@ -23,10 +23,8 @@ def test_palette_escape_stays_in_the_alternate_screen(capsys):
     closed = threading.Event()
 
     def press_escape():
-        # the overlay's setraw flushes pending input, so a key queued up
-        # front is lost: press once it is up, and again (well apart - two
-        # ESCs close together read as one Alt-ESC chord) only if that one
-        # was flushed too.
+        # press once the overlay is up, and again only if it is still open
+        # (well apart - two ESCs close together read as one Alt-ESC chord).
         delay = 0.2
         while not closed.wait(delay):
             os.write(master, KEY_ESC.encode())
@@ -43,3 +41,17 @@ def test_palette_escape_stays_in_the_alternate_screen(capsys):
         os.close(slave)
     assert picked is None
     assert ALT_EXIT not in capsys.readouterr().out
+
+
+def test_keys_typed_before_an_overlay_opens_reach_it():
+    # the overlay frame enters raw mode without discarding pending input: a
+    # filter and Enter typed ahead of the palette pick the command.
+    master, slave = pty.openpty()
+    try:
+        os.write(master, b"mod\r")
+        picked = prompt_palette_overlay(_Screen(slave), [("models", "switch the model"),
+                                                         ("tools", "enable / disable tools")])
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert picked == "models"

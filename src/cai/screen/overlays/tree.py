@@ -17,13 +17,8 @@ False) so the tree never loses an entry while the view is open - the only thing
 that moves between refreshes is the cursor.
 """
 
-import select
-import shutil
-import signal
 import sys
-import termios
 import time
-import tty
 
 from ..ansi import (
     ALT_ENTER,
@@ -34,7 +29,8 @@ from ..ansi import (
     KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_U, KEY_UP, KEY_DOWN,
     KEY_PGUP, KEY_PGDN,
 )
-from ..input import read_key, parse_mouse
+from ..input import parse_mouse
+from .frame import OverlayFrame
 from .model import _draw_model_overlay, _filter_and_sort, overlay_click_index
 from ..togglelist import _find_matches, _handle_search_key
 
@@ -183,7 +179,6 @@ def prompt_tree_overlay(screen,
     preview_scroll = 0   # lines the preview pane is paged up from its tail
     prev_lines = {}
     first_draw = [True]
-    resize_pending = [False]
 
     search_mode = False
     search_direction = 1
@@ -283,12 +278,6 @@ def prompt_tree_overlay(screen,
             search_matches = _find_matches(filtered, search_pattern)
             search_match_idx = min(search_match_idx, len(search_matches) - 1)
 
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        resize_pending[0] = True
-        first_draw[0] = True
-
     def _redraw():
         nonlocal preview_scroll
         preview_scroll = _draw_model_overlay(
@@ -307,21 +296,19 @@ def prompt_tree_overlay(screen,
 
     _rebuild_rows()
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
+    frame = OverlayFrame(screen)
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
 
     result = None
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         _redraw()
         last_refresh = time.monotonic()
 
         while True:
-            if resize_pending[0]:
-                resize_pending[0] = False
+            if frame.resized():
+                first_draw[0] = True
                 _redraw()
 
             now = time.monotonic()
@@ -330,10 +317,9 @@ def prompt_tree_overlay(screen,
                 _refresh_data()
                 _redraw()
 
-            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
-            if not rlist:
+            key = frame.read_key()
+            if key is None:
                 continue
-            key = read_key(screen._tty_fd)
 
             mouse = parse_mouse(key)
             if mouse is not None:
@@ -448,8 +434,7 @@ def prompt_tree_overlay(screen,
             continue
 
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

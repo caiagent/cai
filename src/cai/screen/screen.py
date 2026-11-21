@@ -32,13 +32,14 @@ from .ansi import (
     BRACKET_PASTE_ON, BRACKET_PASTE_OFF,
     SYNC_START, SYNC_END,
     cur_move, ansi_strip, wrap_ansi, display_width,
+    KEY_TAB, KEY_ESC,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer, GUTTER_GLYPH
 from .ask import ConfirmAsk, SelectAsk, MultiAsk, TextAsk
 from .layout import Layout
 from .modes import ModeHandler
-from .input import read_key, editor_argv
+from .input import read_key, run_editor
 
 # minimum time between streaming redraws (~60fps).
 _RENDER_INTERVAL = 0.016
@@ -119,8 +120,7 @@ class Screen:
 
         # in-memory conversation-history tree for the :history view, bound to
         # the run it was built from so attaching elsewhere starts fresh.
-        self._convo_history_tree = None
-        self._convo_history_run_id = None
+        self.history_tree = None
 
         # command-mode completions: top-level commands and sub-options
         # {cmd_name: [sub_options]} - empty list means no sub-options
@@ -143,6 +143,10 @@ class Screen:
         # centre hover widgets: name -> pre-styled lines, painted as one
         # block in the middle of the viewport, over everything else.
         self._center_widgets = {}
+
+        # widgets that go away on the next keypress: name -> the callback
+        # that hides it (see add_widget's dismiss).
+        self._key_dismiss = {}
 
         # chips with an explicit position: name -> Chip, painted at their
         # own (row, col) anchor instead of the top-right stack. chip
@@ -173,6 +177,8 @@ class Screen:
         self._live_seg = -1
         self._live_request = None
         self._live_nested = False
+        # the mode the user was in when the live element took the keyboard.
+        self._live_prev_mode = None
 
         # set by abort_prompt() so a background thread can make a blocked
         # prompt() return without a keypress (the attach pump on host-exit).
@@ -218,7 +224,11 @@ class Screen:
         self._frame_depth = 0
 
         self._tty_file, self._tty_fd = self._open_tty()
-        self._cooked_attrs = termios.tcgetattr(self._tty_fd)
+        self._cooked_attrs = self._cooked_for(self._tty_fd)
+        self._quiet_attrs = self._quiet_from(self._cooked_attrs)
+        # quiet from the start: startup work (loading tools) can take seconds
+        # before the first prompt(), and what is typed then is kept too.
+        termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._quiet_attrs)
 
         # core TUI components
         self._buffer = ContentBuffer(self._cols)
@@ -231,6 +241,50 @@ class Screen:
         sys.stdout.flush()
 
         signal.signal(signal.SIGWINCH, self._on_resize)
+
+    # the terminal's own (cooked) settings per tty device, read once: a
+    # second Screen on the same terminal (a tab) is created while the first
+    # has it in quiet mode, and must not take that for the user's settings.
+    _cooked_by_tty = {}
+
+    @classmethod
+    def _cooked_for(cls, fd):
+        attrs = termios.tcgetattr(fd)
+        try:
+            device = os.fstat(fd).st_rdev
+        except OSError:
+            return attrs
+        return cls._cooked_by_tty.setdefault(device, attrs)
+
+    @staticmethod
+    def _quiet_from(cooked):
+        """the terminal mode between two prompt() calls, while the main
+        thread is busy (a command loading tools): cooked, minus echo and
+        line editing, with keys passed through as raw mode would. what is
+        typed meanwhile is neither printed over the screen nor held back as
+        an unfinished line - it waits, byte for byte, for the next prompt().
+        signals (Ctrl-C) and output processing stay as in cooked mode."""
+        try:
+            quiet = list(cooked)
+            quiet[6] = list(cooked[6])
+            quiet[0] &= ~(termios.BRKINT | termios.ICRNL | termios.INPCK | termios.ISTRIP | termios.IXON)
+            quiet[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
+            quiet[6][termios.VMIN] = 1
+            quiet[6][termios.VTIME] = 0
+        except (TypeError, IndexError):
+            return cooked
+        return quiet
+
+    def _attrs_after_prompt(self, old):
+        """what prompt() leaves the terminal in: the mode it found when that
+        was raw (a prompt nested in another prompt's key loop), quiet mode
+        otherwise."""
+        try:
+            if not old[3] & termios.ISIG:
+                return old
+        except (TypeError, IndexError):
+            return old
+        return self._quiet_attrs
 
     @staticmethod
     def _open_tty():
@@ -570,14 +624,19 @@ class Screen:
         finally:
             self.pop_focus()
 
-    def add_widget(self, name, lines, bottom=False, center=False):
+    def add_widget(self, name, lines, bottom=False, center=False, dismiss=None):
         """add or replace a hover widget: a block of pre-styled lines painted
         over the conversation, anchored top-right (bottom-right, just above the
         prompt, with bottom=True; the middle of the viewport, over the other
         widgets, with center=True). widgets stack vertically in insertion
         order; replacing an existing name keeps its slot. lines carry their
-        own SGR styling - the screen just places them."""
+        own SGR styling - the screen just places them. dismiss is a callback
+        that hides the widget: when given, the next input event at the main
+        prompt calls it (Tab and Esc are swallowed doing so, any other key
+        still does its usual job)."""
         with self._render_lock:
+            if dismiss is not None:
+                self._key_dismiss[name] = dismiss
             if center:
                 self._center_widgets[name] = list(lines)
             elif bottom:
@@ -590,12 +649,25 @@ class Screen:
     def remove_widget(self, name):
         """remove a hover widget. unknown names are ignored."""
         with self._render_lock:
+            self._key_dismiss.pop(name, None)
             stacked = self._widgets.pop(name, None)
             bottom = self._bottom_widgets.pop(name, None)
             centered = self._center_widgets.pop(name, None)
             if stacked is None and bottom is None and centered is None: return
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
+
+    def _dismiss_on_key(self, key):
+        """hide every widget registered to go away on a keypress. returns
+        True when key was spent on the dismissal (Tab, Esc) and must not
+        reach the mode handlers."""
+        with self._render_lock:
+            callbacks = list(self._key_dismiss.values())
+            self._key_dismiss.clear()
+        if not callbacks: return False
+        for callback in callbacks:
+            callback()
+        return key in (KEY_TAB, KEY_ESC)
 
     def add_chip(self, name, chip):
         """add or replace a chip (screen.chip.Chip): a single framed piece
@@ -699,6 +771,34 @@ class Screen:
         """mark whether an LLM response is currently in flight."""
         self._busy = busy
 
+    @property
+    def busy(self):
+        """whether an LLM response is in flight (see set_busy)."""
+        return self._busy
+
+    @property
+    def cols(self):
+        """the terminal's width in columns."""
+        return self._cols
+
+    @property
+    def awaiting_answer(self):
+        """whether the agent is waiting on the user: a confirmation or a
+        question is on screen (or queued for the prompt loop) unanswered."""
+        return self._req_pending is not None or self._live is not None
+
+    def pop_command(self):
+        """the `:`-command (or key-bound command, like 'tabnext') the last
+        prompt() ended on, or None when it ended on something else. reading
+        it clears it."""
+        command = self._command_result
+        self._command_result = None
+        return command
+
+    def prompt_history(self):
+        """the prompts submitted so far, oldest first (a copy)."""
+        return list(self._history)
+
     def abort_prompt(self):
         """make a blocked prompt() return promptly from another thread (no
         keypress). used by the attach pump when the served host exits."""
@@ -727,8 +827,52 @@ class Screen:
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
 
-    def close(self):
-        """exit alternate screen and restore the terminal."""
+    # --- tabs: several Screens sharing the one terminal ---
+    #
+    # each tab owns a whole Screen (its own conversation buffer, input draft,
+    # scroll position, widgets). exactly one is in the foreground - the one
+    # whose prompt() the main loop is inside. the others sit in the
+    # background on the same mechanism an overlay uses: a pushed focus, so
+    # their writes still land in the buffer but nothing is painted.
+
+    def set_tabline(self, cells, fill=''):
+        """show a tab line across the top row - cells is its (text, sgr)
+        segments, fill the sgr for the unused width - or hide it with None.
+        the conversation viewport gives up (or takes back) that row."""
+        with self._render_lock:
+            resized = self._layout.set_tabline(cells, fill)
+            if resized:
+                # the viewport changed height: keep the buffer anchored, the
+                # way a growing input box does.
+                total = self._buffer.line_count()
+                max_offset = max(0, total - self._layout.content_rows)
+                if self._state.auto_scroll:
+                    self._state.viewport_offset = max_offset
+                else:
+                    self._state.viewport_offset = min(self._state.viewport_offset, max_offset)
+            if self._focus_stack[-1] != 'main': return
+            self._refresh_all()
+
+    def background(self):
+        """give the terminal up to another Screen: keep taking writes, stop
+        painting. called between two prompt() calls on the main thread."""
+        self.push_focus('background')
+
+    def foreground(self):
+        """take the terminal back from another Screen: pick up the size it
+        may have been resized to meanwhile, own SIGWINCH again, and repaint
+        with whatever was written while in the background."""
+        ts = shutil.get_terminal_size()
+        self._rows = ts.lines
+        self._cols = ts.columns
+        self._resize_pending = False
+        signal.signal(signal.SIGWINCH, self._on_resize)
+        self.pop_focus()
+
+    def close(self, restore_terminal=True):
+        """exit alternate screen and restore the terminal. restore_terminal
+        False closes just this Screen (a tab) and leaves the terminal to the
+        Screens still open."""
         if self._closed: return
         self._closed = True
         # wake a worker blocked in submit_request so it doesn't hang on a UI
@@ -740,9 +884,17 @@ class Screen:
             pend[1].set()
         if self._live_request is not None:
             self._live_request[0].set()
-        sys.stdout.write(f'{MOUSE_OFF}{BRACKET_PASTE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
-        sys.stdout.flush()
-        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        if restore_terminal:
+            sys.stdout.write(f'{MOUSE_OFF}{BRACKET_PASTE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
+            sys.stdout.flush()
+            signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+            # prompt() leaves the terminal in quiet mode; the shell gets the
+            # settings it had.
+            try:
+                termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
+                self._cooked_by_tty.pop(os.fstat(self._tty_fd).st_rdev, None)
+            except (termios.error, OSError, TypeError):
+                pass
         if self._tty_file is not None:
             try:
                 self._tty_file.close()
@@ -754,7 +906,6 @@ class Screen:
         for inspecting large content (the system prompt) without dumping it
         into the conversation buffer. the next prompt() repaints; the brief
         cooked window between here and there reads no input."""
-        import subprocess
         import tempfile
 
         with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as f:
@@ -765,7 +916,7 @@ class Screen:
             sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
             sys.stdout.flush()
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
-            subprocess.run(editor_argv(tmp, readonly=True))
+            run_editor(tmp, readonly=True)
         finally:
             try:
                 os.unlink(tmp)
@@ -778,7 +929,6 @@ class Screen:
         edited text - or None if the buffer was left unchanged. companion to
         view_in_editor, which is read-only. focus handling is identical: the
         pump's writes buffer behind the 'editor' focus and repaint on pop."""
-        import subprocess
         import tempfile
 
         with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as f:
@@ -790,7 +940,7 @@ class Screen:
             sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
             sys.stdout.flush()
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
-            subprocess.run(editor_argv(tmp))
+            run_editor(tmp)
             with open(tmp) as f:
                 new_text = f.read()
         finally:
@@ -813,17 +963,21 @@ class Screen:
         self._history_idx = -1
         self._command_result = None
 
-        # enter insert mode only if the user was following the conversation
-        # (auto_scroll still on). otherwise stay in normal mode so we don't
-        # jump the cursor while they're reading earlier content.
+        # normal is the resting mode: a fresh screen starts in it, a
+        # submitted prompt returns to it (modes.py), and a ':' command or a
+        # search leaves through it. insert survives only a re-entry that
+        # interrupted typing - an overlay opened mid-draft (Ctrl-T, Ctrl-P)
+        # hands the keyboard back where it was.
+        if self._state.mode != Mode.INSERT:
+            self._state.mode = Mode.NORMAL
+        # still following the conversation: keep the viewport, and the
+        # normal-mode cursor, on its tail.
         if self._state.auto_scroll:
-            self._state.mode = Mode.INSERT
             total = self._buffer.line_count()
             content_rows = self._layout.content_rows
             self._state.viewport_offset = max(0, total - content_rows)
+            self._state.cursor_row = max(0, total - 1)
             self._new_content_below = False
-        else:
-            self._state.mode = Mode.NORMAL
 
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
 
@@ -833,8 +987,10 @@ class Screen:
         cmd_result = None
 
         try:
-            tty.setraw(self._tty_fd)
-            termios.tcflush(self._tty_fd, termios.TCIFLUSH)
+            # TCSADRAIN, and no flush: keys typed while the main thread was
+            # busy between two prompts (see _quiet_from) are kept and read
+            # here, in order.
+            tty.setraw(self._tty_fd, termios.TCSADRAIN)
             self._refresh_all()
             if self._state.mode == Mode.INSERT:
                 sys.stdout.write(f'{CUR_SHOW}{CURSOR_BAR}')
@@ -870,6 +1026,9 @@ class Screen:
                 if not rlist: continue
 
                 key = read_key(self._tty_fd)
+                if self._key_dismiss and self._dismiss_on_key(key):
+                    sys.stdout.flush()
+                    continue
                 try:
                     self._modes.handle_key(key, self._state, self)
                 except SubmitException as e:
@@ -884,7 +1043,7 @@ class Screen:
         except (KeyboardInterrupt, EOFError) as exc:
             caught_exc = exc
         finally:
-            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._attrs_after_prompt(old))
             self._in_prompt = False
             if caught_exc is not None:
                 raise caught_exc
@@ -1163,6 +1322,10 @@ class Screen:
 
         self._live = element
         self._live_request = (done, box)
+        # an ask takes its keys in insert mode: switch there so it can be
+        # answered at once, and go back to where the user was afterwards.
+        self._live_prev_mode = self._state.mode
+        self._state.mode = Mode.INSERT
         with self._render_lock:
             self._start_block()
             self._current_kind = self.ASK
@@ -1201,6 +1364,9 @@ class Screen:
         self._live = None
         self._live_request = None
         element.answered = True
+        if self._state.mode == Mode.INSERT and self._live_prev_mode != Mode.INSERT:
+            self._state.mode = Mode.NORMAL
+        self._live_prev_mode = None
         with self._render_lock:
             self._buffer.replace_segment(self._live_seg, self._live_text(element))
             self._refresh_all()
@@ -1232,7 +1398,7 @@ class Screen:
         if vrow < 0 or vrow >= self._layout.content_rows: return
         _, col = self._live.cursor
         gutter_w = len(ansi_strip(self._kind_gutter(self.ASK)))
-        sys.stdout.write(cur_move(vrow + 1, min(gutter_w + col + 1, self._cols)))
+        sys.stdout.write(cur_move(vrow + 1 + self._layout.content_top, min(gutter_w + col + 1, self._cols)))
         sys.stdout.write(f'{CUR_SHOW}{CURSOR_BLOCK}')
 
     def _refresh_content(self):

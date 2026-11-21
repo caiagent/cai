@@ -71,6 +71,49 @@ def _interrupted(interrupt):
     return interrupt is not None and interrupt.is_set()
 
 
+# how much of a local MCP server's stderr is kept (its newest bytes), and how
+# many of its last lines an "exited" error quotes - enough for a traceback's
+# tail, which is where the exception is.
+_STDERR_KEPT = 16384
+_STDERR_LINES = 20
+
+
+class _StderrTail(threading.Thread):
+    """drains a server's stderr pipe on its own thread (so a chatty server
+    never blocks on a full pipe) and keeps the newest _STDERR_KEPT bytes: what
+    the server said before it died is the only place its Python exception
+    shows up."""
+
+    def __init__(self, pipe, label):
+        super().__init__(daemon=True, name=f"cai-mcp-stderr-{label}")
+        self._pipe = pipe
+        self._lock = threading.Lock()
+        self._tail = bytearray()
+        self.start()
+
+    def run(self):
+        fd = self._pipe.fileno()
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk: break
+            with self._lock:
+                self._tail.extend(chunk)
+                del self._tail[:-_STDERR_KEPT]
+        self._pipe.close()
+
+    def text(self):
+        """the last _STDERR_LINES lines the server wrote, after giving the
+        reader a moment to reach the end of a just-exited server's output."""
+        self.join(0.5)
+        with self._lock:
+            text = self._tail.decode("utf-8", errors="replace")
+        lines = text.strip().splitlines()
+        return "\n".join(lines[-_STDERR_LINES:])
+
+
 class LocalMCPServer:
     """One MCP stdio server subprocess, spoken to over line-delimited JSON-RPC.
     The loop runs tools one at a time, so this stays single-threaded: write a
@@ -100,6 +143,7 @@ class LocalMCPServer:
         self._req_id = 0
         self._buf = bytearray()   # stdout bytes read but not yet split into lines
         self._process = None
+        self._stderr = None
         atexit.register(self.close)
         self._spawn()
 
@@ -111,11 +155,32 @@ class LocalMCPServer:
         self._process = subprocess.Popen(self._command,
                                          stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL,
+                                         stderr=subprocess.PIPE,
                                          env=self._popen_env,
                                          cwd=self._cwd,
                                          start_new_session=True)
+        self._stderr = _StderrTail(self._process.stderr, self.label)
         self._handshake()
+
+    def _exited(self, method):
+        """the error for a server that went away mid-request: its exit code
+        and the tail of its stderr - the traceback of whatever killed it."""
+        process = self._process
+        code = None
+        if process is not None:
+            try:
+                code = process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+        message = f"MCP server {self.label!r} exited during {method!r}"
+        if code is not None:
+            message += f" (exit code {code})"
+        said = ""
+        if self._stderr is not None:
+            said = self._stderr.text()
+        if said:
+            message += f":\n{said}"
+        return ConnectionError(message)
 
     def _ensure(self):
         """a live server to talk to: respawn one killed by an interrupt (or
@@ -195,7 +260,11 @@ class LocalMCPServer:
         message["id"] = req_id
         message["method"] = method
         message["params"] = params
-        self._write(message)
+        try:
+            self._write(message)
+        except OSError:
+            # the pipe is gone: the server died before it could be asked.
+            raise self._exited(method) from None
 
         while True:
             try:
@@ -205,7 +274,7 @@ class LocalMCPServer:
                 self._abort()
                 raise
             if line == "":
-                raise ConnectionError(f"MCP server {self.label!r} exited during {method!r}")
+                raise self._exited(method)
             line = line.decode("utf-8", errors="replace").strip()
             if not line: continue
             try:
@@ -575,6 +644,11 @@ class ToolsRegistry:
         # cache and the set of servers to close.
         self._mcp_servers = {}
 
+    def report_error(self, message):
+        """log an error that was recovered from and keep it on the env for a
+        front end to show (see Environment.report_error)."""
+        self.env.report_error(message)
+
     @classmethod
     def for_tools(cls, tools, env=None):
         """build a registry from a mixed list, registering and selecting each: a
@@ -602,19 +676,21 @@ class ToolsRegistry:
         self._is_name_free(name)
         target = getattr(fn, "_cai_wrap_target", None)
         if target == name:
-            log.error("wrap tool %r wraps itself; skipped", name)
+            self.report_error(f"wrap tool {name!r} wraps itself; skipped")
             return
         self._functions[name] = fn
         self._dispatch[name] = ("function", name)
         self._schemas[name] = schema_from_function(fn)
         self._order.append(name)
         if target is None: return
+        reason = "not available"
         try:
             self.register(target)
-        except Exception:
+        except Exception as e:
             log.exception("wrap tool %r: registering target %r failed", name, target)
+            reason = f"failed to register: {e}"
         if self.has(target): return
-        log.error("wrap tool %r: target %r not available; skipped", name, target)
+        self.report_error(f"wrap tool {name!r}: target {target!r} {reason}; skipped")
         self.remove(name)
 
     def register_mcp_tool(self, name):
@@ -631,10 +707,10 @@ class ToolsRegistry:
             server = self._load_server(mcp_name)
             schema = self._find_tool_schema(server, tool_name, name)
         except Exception as e:
-            log.error("failed loading MCP tool %r: %s", name, e)
+            self.report_error(f"failed loading MCP tool {name!r}: {e}")
             return
         if schema is None:
-            log.error("MCP server %r exposes no tool %r", mcp_name, tool_name)
+            self.report_error(f"MCP server {mcp_name!r} exposes no tool {tool_name!r}")
             return
         self._dispatch[name] = ("mcp", mcp_name, tool_name)
         self._schemas[name] = schema

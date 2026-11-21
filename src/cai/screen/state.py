@@ -34,7 +34,9 @@ class TUIState:
     )
 
     def __init__(self):
-        self.mode = Mode.INSERT
+        # normal is the resting mode: the TUI starts in it and comes back to
+        # it after every submitted prompt.
+        self.mode = Mode.NORMAL
 
         # viewport / navigation
         self.viewport_offset = 0

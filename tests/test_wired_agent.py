@@ -124,7 +124,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.api = api or FakeApi()
     agent.env = Environment()
     agent._system_prompt = None
-    agent.tools_registry = ToolsRegistry.for_tools([])
+    agent.tools_registry = ToolsRegistry.for_tools([], env=agent.env)
     _fake_register(agent.tools_registry, tools)
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=agent.tools_registry)
     agent.skills_registry._names = list(skills or [])
@@ -1186,3 +1186,15 @@ def test_steer_origin_over_wire_tags_the_stored_message(serve):
     assert origins == ["subagent:c1"]
     ok, messages, error = wire.control("get_messages")
     assert {"role": "user", "content": "the findings", "_origin": "subagent:c1"} in messages
+
+
+def test_control_drain_errors_drains_them(serve):
+    agent = make_agent()
+    wire = serve(agent)
+    agent.set_selected_tools(["nosuchserver__tool"])
+    ok, errors, error = wire.control("drain_errors")
+    assert ok is True
+    assert len(errors) == 1
+    assert "nosuchserver__tool" in errors[0]
+    ok, errors, error = wire.control("drain_errors")
+    assert errors == []                            # each failure is reported once

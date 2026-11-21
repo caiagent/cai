@@ -382,7 +382,23 @@ class ModeHandler:
                 state.auto_scroll = False
                 screen._refresh_all()
                 return
+            # gt / gT: next / previous tab.
+            if key == 't':
+                raise CommandException('tabnext')
+            if key == 'T':
+                raise CommandException('tabprev')
             # g + something else: ignore the pending g, process key normally
+
+        # Ctrl-W T: branch the session into a new tab (:checkout).
+        if state.pending_key == 'ctrl-w':
+            state.pending_key = ''
+            if key == 'T':
+                raise CommandException('checkout')
+            return  # Ctrl-W + unknown: ignore
+
+        if key == KEY_CTRL_W:
+            state.pending_key = 'ctrl-w'
+            return
 
         if key == 'j' or key == KEY_DOWN:
             self._scroll_down(state, screen, 1)
@@ -727,6 +743,9 @@ class ModeHandler:
         if result.strip():
             screen._history.insert(0, result)
             screen._save_history_entry(result)
+            # a prompt went out: back to normal mode, still following the
+            # conversation, so the answer can be read and navigated at once.
+            state.mode = Mode.NORMAL
         screen._in_prompt = False
         raise SubmitException(result)
 
@@ -1178,8 +1197,11 @@ class ModeHandler:
             return
 
         layout = screen._layout
-        in_content = 1 <= row <= layout.content_rows
         in_input = layout.input_start_row <= row <= layout.status_row - 1
+        # from here on row counts from the viewport's first row: a tab line
+        # above it pushes the conversation one terminal row down.
+        row -= layout.content_top
+        in_content = 1 <= row <= layout.content_rows
 
         if action == 'release':
             state.mouse_drag_active = False
@@ -1197,7 +1219,7 @@ class ModeHandler:
             self._mouse_press_content(state, screen, col, row)
             return
         if in_input:
-            self._mouse_press_input(state, screen, col, row)
+            self._mouse_press_input(state, screen, col, row + layout.content_top)
             return
 
     def _content_col(self, screen, line_idx, screen_col):

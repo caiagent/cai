@@ -4,9 +4,12 @@ Streamable HTTP). The local case really spawns the bundled fs server; the remote
 case runs against a stub HTTP server in a background thread - no network either
 way. The conftest fixture gives every test a fresh default Environment, so the
 declared servers never leak between tests."""
+import sys
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
 
 import cai
 from cai.environment import Environment, builtin_mcp_dir
@@ -211,3 +214,32 @@ def test_declared_remote_server_loads_through_registry():
             registry.close()
     finally:
         stub.shutdown()
+
+
+def test_local_server_that_crashes_reports_its_traceback(tmp_path):
+    from cai.tools import LocalMCPServer
+
+    script = tmp_path / "broken.py"
+    script.write_text("import sys\nraise RuntimeError('boom at import')\n")
+    with pytest.raises(ConnectionError) as failure:
+        LocalMCPServer([sys.executable, str(script)], "broken")
+    message = str(failure.value)
+    assert "exit code 1" in message
+    assert "RuntimeError: boom at import" in message
+
+
+def test_crashing_server_reaches_the_agent_errors(tmp_path):
+    from cai.environment import Environment
+    from cai.tools import ToolsRegistry, mcp_server
+
+    script = tmp_path / "broken.py"
+    script.write_text("raise RuntimeError('boom at import')\n")
+    env = Environment()
+    env._declared_servers["broken"] = {"command": [sys.executable, str(script)]}
+    registry = ToolsRegistry(env)
+    registry.select("broken__anything")
+    errors = env.drain_errors()
+    assert len(errors) == 1
+    assert "broken__anything" in errors[0]
+    assert "RuntimeError: boom at import" in errors[0]
+    assert env.drain_errors() == []

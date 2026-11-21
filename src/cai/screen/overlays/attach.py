@@ -16,12 +16,8 @@ overlay (returns 'messages'; the caller opens it and may re-enter), ESC/q
 detaches (it runs on)."""
 
 import select
-import shutil
-import signal
 import sys
-import termios
 import time
-import tty
 
 from ..ansi import (
     ALT_ENTER,
@@ -33,6 +29,7 @@ from ..ansi import (
     KEY_UP, KEY_DOWN,
 )
 from ..input import read_key, parse_mouse
+from .frame import OverlayFrame
 
 # minimum time between streaming repaints, so a fast event burst does not
 # repaint the whole viewport once per chunk.
@@ -54,12 +51,6 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
     offset = 0
     prev_key = ''
     painted = None       # the (version, offset, rows, cols, alive) last drawn
-    resize_pending = [False]
-
-    def _on_resize(signum, frame):
-        ts = shutil.get_terminal_size()
-        screen._rows, screen._cols = ts.lines, ts.columns
-        resize_pending[0] = True
 
     def _ctx():
         if ctx_fn is None:
@@ -106,19 +97,16 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
     def _stale():
         return painted != (view.version, offset, screen._rows, screen._cols, alive, _ctx())
 
-    old_attrs = termios.tcgetattr(screen._tty_fd)
-    orig_handler = signal.getsignal(signal.SIGWINCH)
+    frame = OverlayFrame(screen)
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}{CUR_HIDE}')
     sys.stdout.flush()
     try:
-        signal.signal(signal.SIGWINCH, _on_resize)
-        tty.setraw(screen._tty_fd)
+        frame.enter()
         _redraw()
         last_paint = time.monotonic()
 
         while True:
-            if resize_pending[0]:
-                resize_pending[0] = False
+            if frame.resized():
                 view.rewrap(screen._cols)
 
             now = time.monotonic()
@@ -186,8 +174,7 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
             prev_key = key
 
     finally:
-        termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
-        signal.signal(signal.SIGWINCH, orig_handler)
+        frame.leave()
         # stay in the alternate screen: the main TUI lives there too, so
         # leaving it would flash the terminal's primary buffer (the shell's
         # scrollback) until the screen's restore repaints the session.

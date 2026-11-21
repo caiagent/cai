@@ -56,8 +56,8 @@ from cai.paths import safe_path, scratch_dir
 from cai.ui import current_ui
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HookResult, HooksRegistry, ToolCall, hook, current_agent
-from cai.commands import Command, CommandContext, command
-from cai.origin import origin_of
+from cai.commands import Command, CommandContext, Tab, Tabs, command
+from cai.origin import origin_of, tab_origin
 from cai.skills import SlotContext, slot
 from cai.renderers import RenderContext, renderer
 from cai.llm import LLMError, MaxStepsReached, call_llm
@@ -91,7 +91,10 @@ __all__ = [
     "hook",
     "Command",
     "CommandContext",
+    "Tab",
+    "Tabs",
     "origin_of",
+    "tab_origin",
     "command",
     "SlotContext",
     "slot",

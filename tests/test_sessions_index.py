@@ -280,7 +280,7 @@ def test_slash_filters_the_sessions_by_message_content(capsys):
 
     def type_keys():
         # '/', the word, Enter (keep the filter), Enter (pick the top row).
-        # starts once the overlay is up: its setraw flushes anything earlier.
+        # starts once the overlay is up.
         if closed.wait(0.3): return
         for key in "/quokka\r\r":
             os.write(master, key.encode())

@@ -67,8 +67,9 @@ class _WidgetHost:
     def __init__(self):
         self.widgets = {}
 
-    def add_widget(self, name, lines, bottom=False, center=False):
+    def add_widget(self, name, lines, bottom=False, center=False, dismiss=None):
         self.widgets[name] = lines
+        self.dismiss = dismiss
 
     def viewport_size(self):
         return 40, 100
@@ -121,6 +122,7 @@ class _ChipHost:
         self._positioned_chips = {}
         self._bottom_widgets = {}
         self._center_widgets = {}
+        self._key_dismiss = {}
         self._chip_timers = {}
         self._render_lock = threading.RLock()
         self._focus_stack = ['overlay']
@@ -421,6 +423,33 @@ def test_status_panel_starts_hidden_and_toggles():
     assert "status" not in host.widgets
 
 
+def test_status_panel_hides_on_a_keypress_and_stays_hidden():
+    host = _WidgetHost()
+    panel = _StatusPanel(host, _PanelClient(), _Pending(host))
+    panel.toggle()
+    host.dismiss()                                 # what the screen calls on a key
+    assert "status" not in host.widgets
+    assert not panel.visible
+    panel.refresh()                                # the poll loop's next tick
+    assert "status" not in host.widgets
+    panel.toggle()                                 # one Tab brings it back
+    assert "status" in host.widgets
+
+
+def test_screen_dismisses_a_widget_on_any_key_and_swallows_tab_and_esc():
+    host = _ChipHost()
+    host.add_widget = Screen.add_widget.__get__(host)
+    host.remove_widget = Screen.remove_widget.__get__(host)
+    host._dismiss_on_key = Screen._dismiss_on_key.__get__(host)
+    for key, swallowed in (("\t", True), ("\033", True), ("j", False)):
+        host.add_widget("status", ["abcd"], center=True,
+                        dismiss=lambda: host.remove_widget("status"))
+        assert host._dismiss_on_key(key) is swallowed
+        assert "status" not in host._center_widgets
+        assert host._key_dismiss == {}
+    assert host._dismiss_on_key("j") is False      # nothing left to dismiss
+
+
 def test_center_widget_is_placed_in_the_middle_and_painted_last():
     host = _ChipHost()
     host.add_widget = Screen.add_widget.__get__(host)
@@ -430,3 +459,297 @@ def test_center_widget_is_placed_in_the_middle_and_painted_last():
     cells = host._positioned_cells()
     rows = host._layout.content_rows
     assert cells[-2:] == [((rows - 2) // 2, 38, "abcd"), ((rows - 2) // 2 + 1, 38, "efgh")]
+
+
+def test_agent_errors_are_written_as_error_blocks():
+    from cai.tui import _show_agent_errors
+
+    written = []
+
+    class _Screen:
+        def write(self, text, kind=None, block=False):
+            written.append((text, kind, block))
+
+    class _Client:
+        def drain_errors(self):
+            return ["failed loading MCP tool 'a__b': boom"]
+
+    _show_agent_errors(_Screen(), _Client())
+    assert written == [("[error: failed loading MCP tool 'a__b': boom]\n", Screen.ERROR, True)]
+
+
+def test_environment_errors_drain_once_and_do_not_repeat_while_queued():
+    from cai.environment import Environment
+
+    env = Environment()
+    env.report_error("hook 'h' raised: boom")
+    env.report_error("hook 'h' raised: boom")      # still undrained: not queued twice
+    env.report_error("other")
+    assert env.drain_errors() == ["hook 'h' raised: boom", "other"]
+    assert env.drain_errors() == []
+    env.report_error("other")                      # after a drain it shows again
+    assert env.drain_errors() == ["other"]
+
+
+# --- tabs ---
+
+
+def test_clone_point_drops_a_tool_exchange_still_in_flight():
+    from cai.tui import _clone_point
+
+    user = {"role": "user", "content": "go"}
+    calls = {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]}
+    first = {"role": "tool", "tool_call_id": "a", "content": "1"}
+    second = {"role": "tool", "tool_call_id": "b", "content": "2"}
+    assert _clone_point([user, calls]) == [user]                     # none answered yet
+    assert _clone_point([user, calls, first]) == [user]              # one of two answered
+    assert _clone_point([user, calls, first, second]) == [user, calls, first, second]
+    answer = {"role": "assistant", "content": "done"}
+    assert _clone_point([user, answer]) == [user, answer]
+    assert _clone_point([]) == []
+
+
+def test_clone_point_is_a_copy():
+    from cai.tui import _clone_point
+
+    messages = [{"role": "user", "content": "go"}]
+    copied = _clone_point(messages)
+    copied[0]["content"] = "changed"
+    assert messages[0]["content"] == "go"
+
+
+def test_tab_line_numbers_labels_and_marks_the_tabs():
+    from cai.tui import _tab_line_cells, _TAB_CURRENT, _TAB_OTHER
+
+    cells = _tab_line_cells(["fix bug", "abc123", "plan"], ["", "…", "+"], 1)
+    assert cells == [(" 1 fix bug ", _TAB_OTHER),
+                     (" 2… abc123 ", _TAB_CURRENT),
+                     (" 3+ plan ", _TAB_OTHER)]
+
+
+def test_tab_label_is_the_first_typed_prompt():
+    from cai.tui import _tab_label
+
+    assert _tab_label([], "abc123") == "abc123"
+    messages = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "  fix the\n login bug please, it is broken  "}]
+    assert _tab_label(messages, "abc123") == "fix the login bug pleas…"
+
+
+def test_tab_line_takes_the_top_row_and_shifts_the_viewport():
+    layout = Layout(rows=24, cols=20)
+    rows = layout.content_rows
+    assert layout.content_top == 0
+    assert layout.set_tabline([(" 1 a ", "<A>"), (" 2 b ", "<B>")], "<F>") is True
+    assert layout.content_top == 1
+    assert layout.content_rows == rows - 1
+    assert ansi_strip(layout._tabline_text(20)).replace("<A>", "").replace("<B>", "").replace("<F>", "") \
+        == " 1 a  2 b " + " " * 10
+    assert layout._tabline_text(7).count(" 2") == 1          # cut, never wider than the row
+    assert layout.set_tabline(None) is True
+    assert layout.content_rows == rows
+
+
+def test_normal_mode_tab_keys_raise_the_tab_commands():
+    from cai.screen.modes import ModeHandler
+    from cai.screen.state import CommandException, Mode, TUIState
+
+    class _Screen:
+        _live = None
+        _buffer = None
+        _layout = None
+
+    handler = ModeHandler()
+    for keys, command in (("gt", "tabnext"), ("gT", "tabprev"), ("\x17T", "checkout")):
+        state = TUIState()
+        state.mode = Mode.NORMAL
+        raised = None
+        try:
+            for key in keys:
+                handler.handle_key(key, state, _Screen())
+        except CommandException as e:
+            raised = e.value
+        assert raised == command
+        assert state.pending_key == ''
+
+
+def test_a_background_screen_takes_writes_without_painting():
+    host = _ChipHost()
+    host._focus_stack = ['main']
+    host.push_focus = Screen.push_focus.__get__(host)
+    host.background = Screen.background.__get__(host)
+    host.background()
+    assert host._focus_stack == ['main', 'background']
+    host.add_widget = Screen.add_widget.__get__(host)
+    host.add_widget("tabs", ["x"])                 # would repaint if in front
+    assert host._widgets["tabs"] == ["x"]
+
+
+# --- normal is the resting mode ---
+
+
+def test_a_fresh_state_starts_in_normal_mode():
+    from cai.screen.state import Mode, TUIState
+
+    assert TUIState().mode == Mode.NORMAL
+
+
+def test_submitting_a_prompt_returns_to_normal_mode():
+    from cai.screen.modes import ModeHandler
+    from cai.screen.state import Mode, SubmitException, TUIState
+
+    class _Screen:
+        _cursor_pos = 2
+        _in_prompt = True
+
+        def __init__(self, text):
+            self._input_buf = list(text)
+            self._history = []
+
+        def _save_history_entry(self, entry):
+            pass
+
+    for text, mode in (("hi", Mode.NORMAL), ("  ", Mode.INSERT)):
+        state = TUIState()
+        state.mode = Mode.INSERT
+        try:
+            ModeHandler()._handle_submit(state, _Screen(text))
+        except SubmitException as e:
+            assert e.value == text
+        assert state.mode == mode                  # an empty Enter sends nothing: stay put
+
+
+# --- the `:`-command table ----------------------------------------------------
+
+class _CmdScreen:
+    def __init__(self, busy=False):
+        self.busy = busy
+        self.written = []
+
+    def write(self, text, kind=None, block=False):
+        self.written.append(text)
+
+
+class _CmdTab:
+    def __init__(self, busy=False):
+        self.screen = _CmdScreen(busy)
+
+
+class _CmdTabs:
+    def __init__(self, tab):
+        self.current = tab
+
+
+def test_every_command_is_defined_once_and_feeds_the_palette():
+    from cai.tui import _COMMANDS, _PALETTE_ARG_COMMANDS, _PALETTE_COMMANDS, _command_index
+    names = [command.name for command in _COMMANDS]
+    assert len(names) == len(set(names))
+    assert [name for name, _help in _PALETTE_COMMANDS] == names
+    assert _PALETTE_ARG_COMMANDS == ("allow", "disallow", "save", "load")
+    index = _command_index(_COMMANDS)
+    assert index["q"] is index["quit"] and index["qall"] is index["qa"]
+
+
+def test_dispatch_runs_the_command_with_its_argument():
+    from cai.tui import _Command, _command_index, _dispatch
+    seen = []
+    index = _command_index([_Command("go", "", lambda ctx: seen.append((ctx.head, ctx.arg))),
+                            _Command("bye", "", lambda ctx: True, aliases=("b",))])
+    tabs = _CmdTabs(_CmdTab())
+    assert _dispatch(index, tabs, "go  far away ") is False
+    assert seen == [("go", "far away")]
+    assert _dispatch(index, tabs, "b") is True              # True leaves the TUI
+
+
+def test_dispatch_refuses_an_idle_only_command_while_busy():
+    from cai.tui import _Command, _command_index, _dispatch
+    ran = []
+    index = _command_index([_Command("clear", "", lambda ctx: ran.append(1), idle=True)])
+    tab = _CmdTab(busy=True)
+    assert _dispatch(index, _CmdTabs(tab), "clear") is False
+    assert ran == [] and tab.screen.written == ["[busy — :clear when idle]\n"]
+    tab.screen.busy = False
+    _dispatch(index, _CmdTabs(tab), "clear")
+    assert ran == [1]
+
+
+def test_dispatch_falls_back_to_an_extension_command_then_reports_unknown():
+    from cai.environment import Environment
+    from cai.commands import Command
+    from cai.tui import _dispatch
+
+    class _Shared:
+        env = Environment()
+
+    class _Worker:
+        ui = None
+
+    tab = _CmdTab()
+    tab.shared = _Shared()
+    tab.worker = _Worker()
+    tab.client = object()
+    got = []
+    _Shared.env.register_command("hello", Command(fn=lambda ctx: got.append(ctx.args)))
+    assert _dispatch({}, _CmdTabs(tab), "hello there") is False
+    assert got == ["there"]
+    _dispatch({}, _CmdTabs(tab), "nope")
+    assert tab.screen.written == ["[unknown command: :nope]\n"]
+
+
+def test_an_extension_command_gets_the_tabs_and_honours_idle():
+    import cai
+    from cai.environment import Environment
+    from cai.tui import _dispatch
+
+    class _Shared:
+        env = Environment.default()
+
+    class _Worker:
+        ui = None
+
+    tab = _CmdTab()
+    tab.shared = _Shared()
+    tab.worker = _Worker()
+    tab.client = object()
+    got = []
+
+    @cai.command(takes_arg=True, idle=True)
+    def careful(ctx):
+        got.append(ctx)
+
+    registered = Environment.default().commands()["careful"]
+    assert registered.takes_arg and registered.idle
+    tabs = _CmdTabs(tab)
+    tab.screen.busy = True
+    assert _dispatch({}, tabs, "careful") is False
+    assert got == [] and tab.screen.written == ["[busy — :careful when idle]\n"]
+    tab.screen.busy = False
+    _dispatch({}, tabs, "careful")
+    assert len(got) == 1 and got[0].tabs._tabs is tabs     # ctx.tabs wraps the TUI's tabs
+    assert got[0].tab == got[0].tabs.current
+    assert got[0].screen is tab.screen and got[0].client is tab.client
+
+
+def test_ctrl_c_in_an_extension_command_ends_the_command_not_the_tui():
+    import cai
+    from cai.environment import Environment
+    from cai.tui import _dispatch
+
+    class _Shared:
+        env = Environment.default()
+
+    class _Worker:
+        ui = None
+
+    tab = _CmdTab()
+    tab.shared = _Shared()
+    tab.worker = _Worker()
+    tab.client = object()
+
+    @cai.command
+    def slow(ctx):
+        raise KeyboardInterrupt
+
+    assert _dispatch({}, _CmdTabs(tab), "slow") is False    # False: the TUI carries on
+    assert tab.screen.written == ["[:slow interrupted]\n"]
+

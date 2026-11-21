@@ -1,6 +1,6 @@
-# clone — an example cai extension
+# checkpoint — an example cai extension
 
-Session checkpoints: **`:clone`** saves the session to its `.flow` file (the
+Session checkpoints: **`:checkpoint`** saves the session to its `.flow` file (the
 checkpoint), then swaps the served agent for a fresh branch of itself. You keep
 typing into the same conversation, but under a new agent name — so autosave
 writes the branch to a **new** `.flow` from here on and the checkpoint file
@@ -10,22 +10,22 @@ stays frozen at this point. Return to the checkpoint with `:sessions` (or
 ## Layout
 
 ```
-clone/
+checkpoint/
 ├── README.md
-└── init.py      # @cai.command clone
+└── init.py      # @cai.command checkpoint
 ```
 
 A cai extension is a self-contained bundle. cai imports the bundle's `init.py`
-at startup; the `@cai.command` decorator registers `:clone` onto the
+at startup; the `@cai.command` decorator registers `:checkpoint` onto the
 Environment being loaded.
 
 ## Install
 
 ```sh
-cp -r examples/extensions/clone ~/.config/cai/extensions/
+cp -r examples/extensions/checkpoint ~/.config/cai/extensions/
 ```
 
-Start cai: `:clone` tab-completes after `:` and is in the Ctrl-P palette.
+Start cai: `:checkpoint` tab-completes after `:` and is in the Ctrl-P palette.
 
 ## How it works
 

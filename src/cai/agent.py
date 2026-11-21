@@ -313,7 +313,21 @@ class Agent:
             try:
                 self.tools_registry.select(name)
             except ValueError:
-                log.warning("tool %r is not available to this agent; skipping", name)
+                self.report_error(f"tool {name!r} is not available to this agent; skipped")
+
+    def report_error(self, message):
+        """log an error the agent recovered from on its own (a tool or skill
+        that failed to load and was skipped, ...) and keep it for
+        drain_errors, so a front end can show the user what went wrong. the
+        queue lives on the env, so it also holds what failed before any
+        agent existed (an extension that did not import) and what a
+        sub-agent sharing the env reported."""
+        self.env.report_error(message)
+
+    def drain_errors(self):
+        """the errors reported since the last call (each a line of text,
+        oldest first). draining clears them, so each is shown once."""
+        return self.env.drain_errors()
 
     def get_selected_skills(self):
         """the active skill names - what set_selected_skills controls."""
