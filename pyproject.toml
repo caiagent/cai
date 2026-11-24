@@ -30,4 +30,5 @@ where = ["src"]
 # (*.md) and extension bundles (extensions/<name>/init.py). they live beside the package but are not importable modules, so they
 # must be declared as package data or a non-editable install drops them.
 [tool.setuptools.package-data]
-cai = ["builtins/mcps/*.py", "builtins/skills/*.md", "builtins/extensions/*/*.py", "py.typed"]
+cai = ["builtins/mcps/*.py", "builtins/skills/*.md", "builtins/extensions/*/*.py", "builtins/themes/*.json",
+       "py.typed"]

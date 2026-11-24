@@ -1180,6 +1180,25 @@ class Screen:
         finally:
             self.pop_focus()
 
+    def prompt_theme_overlay(self, themes, current=None, on_move=None):
+        """theme picker over theme names (kept in the caller's order), the
+        cursor starting on `current`. on_move(name) is called as the cursor
+        lands on each one, so the caller can preview it live. returns the
+        picked name or None on cancel."""
+        from .overlays.model import prompt_model_overlay
+
+        self.push_focus('model')
+        try:
+            return prompt_model_overlay(self,
+                                        themes,
+                                        presorted=True,
+                                        noun="themes",
+                                        navigate=True,
+                                        on_move=on_move,
+                                        initial=current)
+        finally:
+            self.pop_focus()
+
     def prompt_history_overlay(self, entries, preview_fn=None):
         """fuzzy picker over prompt-history entries (kept in the caller's
         newest-first order): type to filter, the preview pane shows the full

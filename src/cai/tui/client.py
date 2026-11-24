@@ -394,10 +394,12 @@ class _Worker(threading.Thread):
             self._lost(None)
             return False
         for msg in messages:
-            self._handle(msg)
+            self._handle_message(msg)
         return True
 
-    def _handle(self, msg):
+    # not `_handle`: python 3.13's threading.Thread keeps its own thread handle
+    # in an attribute of that name, which would replace this method.
+    def _handle_message(self, msg):
         if self._client.stream.answer(msg, self._ui):
             return
         kind = msg.get("type")

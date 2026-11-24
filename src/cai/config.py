@@ -29,6 +29,9 @@ Optional keys (read via load_optional, never required) may also appear:
                          also takes --model).
   system_one_base_url  - the endpoint System One calls go to, when it is not
                          `base_url` (default: `base_url`).
+  theme                - the TUI colour theme: the name of a <name>.json in
+                         ~/.config/cai/themes/ or one shipped with cai (see
+                         cai.theme). written by :theme; default "default".
 
 A third file, system_one_api_key, is the bearer token for System One calls when
 it differs from the chat one (default: the api_key file).
@@ -43,6 +46,7 @@ Above everything sit runtime overrides (set_override), registered by the CLI's
 --base-url / --api-key flags for one-off runs against another provider."""
 import os
 import sys
+import shutil
 import json
 import logging
 import dataclasses
@@ -84,6 +88,10 @@ def config_dir():
 
 def config_path():
     return os.path.join(config_dir(), "config.json")
+
+
+def themes_dir():
+    return os.path.join(config_dir(), "themes")
 
 
 def api_key_path():
@@ -208,3 +216,32 @@ def load_system_one_api_key():
     if not key:
         raise ValueError(f"API key file {path} is empty")
     return key
+
+
+def save_optional(key, value):
+    """write one optional key into config.json, leaving every other key as it
+    is. the file is rewritten whole through a temp file, so a crash mid-write
+    never leaves it truncated. raises ValueError when the existing file is not
+    valid JSON - it is not overwritten."""
+    # the real file: a config.json that is a symlink (a dotfiles repo) keeps
+    # being one, and the file it points at is the one rewritten.
+    path = os.path.realpath(config_path())
+    data = {}
+    exists = os.path.exists(path)
+    if exists:
+        with open(path) as f:
+            try:
+                data = json.load(f)
+            except ValueError as e:
+                raise ValueError(f"config {path} is not valid JSON: {e}")
+        if not isinstance(data, dict):
+            raise ValueError(f"config {path} must be a JSON object")
+    data[key] = value
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    if exists:
+        shutil.copymode(path, tmp)
+    os.replace(tmp, path)

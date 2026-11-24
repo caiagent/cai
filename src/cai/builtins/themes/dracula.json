@@ -1,0 +1,42 @@
+{
+  "name": "Dracula",
+  "background": "#282A36",
+  "foreground": "#F8F8F2",
+  "cursor": "#F8F8F2",
+  "ansi": {
+    "black": "#191A21",
+    "red": "#FF5555",
+    "green": "#50fa7b",
+    "yellow": "#F1FA8C",
+    "blue": "#BD93F9",
+    "magenta": "#FF79C6",
+    "cyan": "#8BE9FD",
+    "white": "#ABB2BF",
+    "bright_black": "#44475A",
+    "bright_red": "#FF6E6E",
+    "bright_green": "#69FF94",
+    "bright_yellow": "#FFFFA5",
+    "bright_blue": "#D6ACFF",
+    "bright_magenta": "#FF92DF",
+    "bright_cyan": "#A4FFFF",
+    "bright_white": "#FFFFFF"
+  },
+  "ui": {
+    "accent": "#BD93F9",
+    "bar_background": "#44475A",
+    "tab_text": "#ABB2BF",
+    "chip_pink": "#FF79C6",
+    "chip_yellow": "#F1FA8C",
+    "chip_green": "#50fa7b"
+  },
+  "syntax": {
+    "comment": "#6272A4",
+    "keyword": "#FF79C6",
+    "string": "#F1FA8C",
+    "number": "#BD93F9",
+    "function": "#50fa7b",
+    "builtin": "#8BE9FD",
+    "deleted": "#FF5555",
+    "code_text": "#F8F8F2"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "Zenbones Dark",
+  "background": "#1C1917",
+  "foreground": "#B4BDC3",
+  "cursor": "#C4CACF",
+  "ansi": {
+    "black": "#1C1917",
+    "red": "#DE6E7C",
+    "green": "#819B69",
+    "yellow": "#B77E64",
+    "blue": "#6099C0",
+    "magenta": "#B279A7",
+    "cyan": "#66A5AD",
+    "white": "#B4BDC3",
+    "bright_black": "#403833",
+    "bright_red": "#E8838F",
+    "bright_green": "#8BAE68",
+    "bright_yellow": "#D68C67",
+    "bright_blue": "#61ABDA",
+    "bright_magenta": "#CF86C1",
+    "bright_cyan": "#65B8C1",
+    "bright_white": "#888F94"
+  },
+  "ui": {
+    "accent": "#6099C0",
+    "bar_background": "#352F2D",
+    "tab_text": "#888F94",
+    "chip_pink": "#CF86C1",
+    "chip_yellow": "#D68C67",
+    "chip_green": "#8BAE68"
+  },
+  "syntax": {
+    "comment": "#888F94",
+    "keyword": "#B4BDC3",
+    "string": "#819B69",
+    "number": "#B279A7",
+    "function": "#C4CACF",
+    "builtin": "#66A5AD",
+    "deleted": "#DE6E7C",
+    "code_text": "#B4BDC3"
+  }
+}

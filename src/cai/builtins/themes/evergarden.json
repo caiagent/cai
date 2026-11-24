@@ -1,0 +1,42 @@
+{
+  "name": "Evergarden Fall",
+  "background": "#232a2e",
+  "foreground": "#f8f9e8",
+  "cursor": "#cbe3b3",
+  "ansi": {
+    "black": "#171c1f",
+    "red": "#f57f82",
+    "green": "#cbe3b3",
+    "yellow": "#f5d098",
+    "blue": "#b2caed",
+    "magenta": "#d2bdf3",
+    "cyan": "#b3e3ca",
+    "white": "#adc9bc",
+    "bright_black": "#6f8788",
+    "bright_red": "#f7a182",
+    "bright_green": "#dbe6af",
+    "bright_yellow": "#f5d098",
+    "bright_blue": "#afd9e6",
+    "bright_magenta": "#f3c0e5",
+    "bright_cyan": "#b3e6db",
+    "bright_white": "#f8f9e8"
+  },
+  "ui": {
+    "accent": "#cbe3b3",
+    "bar_background": "#374145",
+    "tab_text": "#96b4aa",
+    "chip_pink": "#f3c0e5",
+    "chip_yellow": "#f5d098",
+    "chip_green": "#cbe3b3"
+  },
+  "syntax": {
+    "comment": "#6f8788",
+    "keyword": "#f57f82",
+    "string": "#dbe6af",
+    "number": "#d2bdf3",
+    "function": "#b2caed",
+    "builtin": "#b3e3ca",
+    "deleted": "#f57f82",
+    "code_text": "#f8f9e8"
+  }
+}

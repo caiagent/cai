@@ -1,0 +1,42 @@
+{
+  "name": "Tender",
+  "background": "#282828",
+  "foreground": "#eeeeee",
+  "cursor": "#eeeeee",
+  "ansi": {
+    "black": "#1d1d1d",
+    "red": "#f43753",
+    "green": "#c9d05c",
+    "yellow": "#ffc24b",
+    "blue": "#b3deef",
+    "magenta": "#d3b987",
+    "cyan": "#73cef4",
+    "white": "#eeeeee",
+    "bright_black": "#666666",
+    "bright_red": "#f43753",
+    "bright_green": "#c9d05c",
+    "bright_yellow": "#ffc24b",
+    "bright_blue": "#b3deef",
+    "bright_magenta": "#d3b987",
+    "bright_cyan": "#73cef4",
+    "bright_white": "#ffffff"
+  },
+  "ui": {
+    "accent": "#73cef4",
+    "bar_background": "#444444",
+    "tab_text": "#dadada",
+    "chip_pink": "#f43753",
+    "chip_yellow": "#ffc24b",
+    "chip_green": "#c9d05c"
+  },
+  "syntax": {
+    "comment": "#666666",
+    "keyword": "#73cef4",
+    "string": "#d3b987",
+    "number": "#ffc24b",
+    "function": "#b3deef",
+    "builtin": "#73cef4",
+    "deleted": "#f43753",
+    "code_text": "#eeeeee"
+  }
+}

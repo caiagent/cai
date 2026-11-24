@@ -1,0 +1,42 @@
+{
+  "name": "Cyberdream",
+  "background": "#16181a",
+  "foreground": "#ffffff",
+  "cursor": "#ffffff",
+  "ansi": {
+    "black": "#16181a",
+    "red": "#ff6e5e",
+    "green": "#5eff6c",
+    "yellow": "#f1ff5e",
+    "blue": "#5ea1ff",
+    "magenta": "#bd5eff",
+    "cyan": "#5ef1ff",
+    "white": "#ffffff",
+    "bright_black": "#3c4048",
+    "bright_red": "#ff6e5e",
+    "bright_green": "#5eff6c",
+    "bright_yellow": "#f1ff5e",
+    "bright_blue": "#5ea1ff",
+    "bright_magenta": "#bd5eff",
+    "bright_cyan": "#5ef1ff",
+    "bright_white": "#ffffff"
+  },
+  "ui": {
+    "accent": "#5ef1ff",
+    "bar_background": "#3c4048",
+    "tab_text": "#7b8496",
+    "chip_pink": "#ff5ea0",
+    "chip_yellow": "#f1ff5e",
+    "chip_green": "#5eff6c"
+  },
+  "syntax": {
+    "comment": "#7b8496",
+    "keyword": "#ffbd5e",
+    "string": "#5eff6c",
+    "number": "#ff5ea0",
+    "function": "#5ea1ff",
+    "builtin": "#5ef1ff",
+    "deleted": "#ff6e5e",
+    "code_text": "#ffffff"
+  }
+}

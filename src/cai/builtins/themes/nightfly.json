@@ -1,0 +1,42 @@
+{
+  "name": "Nightfly",
+  "background": "#011627",
+  "foreground": "#bdc1c6",
+  "cursor": "#9ca1aa",
+  "ansi": {
+    "black": "#1d3b53",
+    "red": "#fc514e",
+    "green": "#a1cd5e",
+    "yellow": "#e3d18a",
+    "blue": "#82aaff",
+    "magenta": "#c792ea",
+    "cyan": "#7fdbca",
+    "white": "#a1aab8",
+    "bright_black": "#7c8f8f",
+    "bright_red": "#ff5874",
+    "bright_green": "#21c7a8",
+    "bright_yellow": "#ecc48d",
+    "bright_blue": "#82aaff",
+    "bright_magenta": "#ae81ff",
+    "bright_cyan": "#7fdbca",
+    "bright_white": "#d6deeb"
+  },
+  "ui": {
+    "accent": "#82aaff",
+    "bar_background": "#1d3b53",
+    "tab_text": "#acb4c2",
+    "chip_pink": "#ff5874",
+    "chip_yellow": "#e3d18a",
+    "chip_green": "#a1cd5e"
+  },
+  "syntax": {
+    "comment": "#7c8f8f",
+    "keyword": "#c792ea",
+    "string": "#ecc48d",
+    "number": "#ff5874",
+    "function": "#82aaff",
+    "builtin": "#7fdbca",
+    "deleted": "#fc514e",
+    "code_text": "#bdc1c6"
+  }
+}

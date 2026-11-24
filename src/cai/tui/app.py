@@ -1,11 +1,14 @@
 """tui.app: run() - build the first tab and drive the main loop: prompt, then
 route what came back to a tab command, a `:`-command, a steer or a new turn."""
+import atexit
+import signal
 import sys
 import threading
 
 from cai.environment import Environment
 from cai.screen import Screen
 from cai import sessions_index
+from cai import theme
 from cai.session import SessionsRegistry
 from cai.tui.status import _DEFAULT_CONTEXT_SIZE, _show_agent_errors
 from cai.tui.pickers import _load_session, _open_sessions
@@ -25,6 +28,10 @@ from cai.tui.tabs import _TAB_COMMANDS, _Shared, _Tab, _Tabs
 _COMMANDS = _SESSION_COMMANDS + _TAB_COMMANDS
 _PALETTE_COMMANDS = _palette_entries(_COMMANDS)
 _PALETTE_ARG_COMMANDS = _arg_command_names(_COMMANDS)
+
+
+def _exit_on_signal(signum, _frame):
+    raise SystemExit(128 + signum)
 
 
 def run(*,
@@ -151,6 +158,18 @@ def run(*,
     # full index instead of reading them while the user waits.
     sessions_index.default().warm()
 
+    # the saved colour theme, now the first screen owns the terminal. undone in
+    # the finally below, and at exit in case something escapes it.
+    atexit.register(theme.reset)
+    # a plain `kill` would skip both and leave the terminal recoloured: turn it
+    # into an ordinary exit, unless something else already handles it.
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+        signal.signal(signal.SIGTERM, _exit_on_signal)
+    try:
+        theme.apply(config.load_optional("theme", theme.DEFAULT))
+    except ValueError as e:
+        screen.write(f"[theme: {e}]\n", kind=Screen.META, block=True)
+
     screen.write(f"cai — model {tab.model}. i to type; :q to quit; Tab for status.\n",
                  kind=Screen.META, block=True)
     # what failed to load before the TUI attached, then the poll loop takes over.
@@ -206,6 +225,7 @@ def run(*,
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
+        theme.reset()
         if tabs.count():
             tabs.close_all()
     return 0

@@ -1,0 +1,42 @@
+{
+  "name": "Melange Dark",
+  "background": "#292522",
+  "foreground": "#ECE1D7",
+  "cursor": "#ECE1D7",
+  "ansi": {
+    "black": "#34302C",
+    "red": "#BD8183",
+    "green": "#78997A",
+    "yellow": "#E49B5D",
+    "blue": "#7F91B2",
+    "magenta": "#B380B0",
+    "cyan": "#7B9695",
+    "white": "#C1A78E",
+    "bright_black": "#867462",
+    "bright_red": "#D47766",
+    "bright_green": "#85B695",
+    "bright_yellow": "#EBC06D",
+    "bright_blue": "#A3A9CE",
+    "bright_magenta": "#CF9BC2",
+    "bright_cyan": "#89B3B6",
+    "bright_white": "#ECE1D7"
+  },
+  "ui": {
+    "accent": "#EBC06D",
+    "bar_background": "#403A36",
+    "tab_text": "#C1A78E",
+    "chip_pink": "#CF9BC2",
+    "chip_yellow": "#EBC06D",
+    "chip_green": "#85B695"
+  },
+  "syntax": {
+    "comment": "#C1A78E",
+    "keyword": "#E49B5D",
+    "string": "#A3A9CE",
+    "number": "#CF9BC2",
+    "function": "#EBC06D",
+    "builtin": "#89B3B6",
+    "deleted": "#D47766",
+    "code_text": "#ECE1D7"
+  }
+}

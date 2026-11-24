@@ -1,0 +1,42 @@
+{
+  "name": "Oxocarbon",
+  "background": "#161616",
+  "foreground": "#f2f4f8",
+  "cursor": "#f2f4f8",
+  "ansi": {
+    "black": "#2a2a2a",
+    "red": "#33b1ff",
+    "green": "#be95ff",
+    "yellow": "#42be65",
+    "blue": "#78a9ff",
+    "magenta": "#82cfff",
+    "cyan": "#3ddbd9",
+    "white": "#f2f4f8",
+    "bright_black": "#5c5c5c",
+    "bright_red": "#33b1ff",
+    "bright_green": "#be95ff",
+    "bright_yellow": "#42be65",
+    "bright_blue": "#78a9ff",
+    "bright_magenta": "#82cfff",
+    "bright_cyan": "#08bdba",
+    "bright_white": "#ffffff"
+  },
+  "ui": {
+    "accent": "#78a9ff",
+    "bar_background": "#404040",
+    "tab_text": "#dde1e6",
+    "chip_pink": "#ff7eb6",
+    "chip_yellow": "#42be65",
+    "chip_green": "#be95ff"
+  },
+  "syntax": {
+    "comment": "#5c5c5c",
+    "keyword": "#78a9ff",
+    "string": "#be95ff",
+    "number": "#82cfff",
+    "function": "#3ddbd9",
+    "builtin": "#ff7eb6",
+    "deleted": "#ee5396",
+    "code_text": "#f2f4f8"
+  }
+}

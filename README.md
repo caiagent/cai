@@ -34,6 +34,40 @@ Nothing is defaulted: a missing or incomplete config stops cai with a clear
 message. If `~/.config/cai/SYSTEM.md` or `./SYSTEM.md` exist, they are appended
 to the system prompt (then `--system-prompt`, when given).
 
+### Themes
+
+`:theme` (also in the Ctrl-P palette) picks the TUI's colour theme: each one is
+previewed as you move over it, Enter keeps it and saves it as `"theme"` in
+`config.json`, Esc puts the previous one back. `:config` has the same choice as
+a row. `default` is your terminal's own colours; the themes that ship with cai
+are in `src/cai/builtins/themes/` (dracula, gruvbox, catppuccin, tokyonight,
+kanagawa and others).
+
+Your own themes are `~/.config/cai/themes/<name>.json` (a file named like a
+shipped theme replaces it). Every key is optional:
+
+```json
+{
+  "background": "#282A36", "foreground": "#F8F8F2", "cursor": "#F8F8F2",
+  "ansi":   {"black": "#21222C", "red": "#FF5555", "bright_black": "#6272A4"},
+  "ui":     {"accent": "#BD93F9", "bar_background": "#44475A", "tab_text": "#F8F8F2",
+             "chip_pink": "#FF79C6", "chip_yellow": "#F1FA8C", "chip_green": "#50FA7B"},
+  "syntax": {"comment": "#6272A4", "keyword": "#FF79C6", "string": "#F1FA8C",
+             "number": "#FFB86C", "function": "#8BE9FD", "builtin": "#8BE9FD",
+             "deleted": "#FF5555", "code_text": "#F8F8F2"}
+}
+```
+
+`ansi` takes the eight colour names and their `bright_` forms. `syntax` colours
+the markdown extension's code blocks; there `number` is also inline code and
+`function` is also links.
+
+A theme works by redefining the terminal's colours (OSC 4/10/11/12) while cai
+runs, and restoring them on exit - so it changes what cai's "cyan" looks like,
+not which parts are cyan. It needs a terminal that supports those sequences
+(iTerm2, kitty, ghostty, WezTerm, tmux 3.3+; not Apple Terminal). Inside tmux
+only cai's pane is recoloured.
+
 ### init.py
 
 `~/.config/cai/init.py` is optional Python imported on every load, after the

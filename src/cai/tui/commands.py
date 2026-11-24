@@ -28,6 +28,7 @@ from cai.tui.pickers import (
     _open_sessions,
     _open_skills,
     _open_system,
+    _open_theme,
     _open_tools,
 )
 
@@ -226,6 +227,8 @@ _SESSION_COMMANDS = [
              lambda ctx: _open_sessions(ctx.screen, ctx.client, ctx.status, ctx.settings), idle=True),
     _Command("config", "edit the live session settings",
              lambda ctx: _open_config(ctx.screen, ctx.client, ctx.settings)),
+    _Command("theme", "switch the colour theme (saved to config.json)",
+             lambda ctx: _open_theme(ctx.screen)),
     _Command("pwd", "print the agent's current working directory",
              lambda ctx: _pwd_command(ctx.screen, ctx.client)),
     _Command("allow", "grant tools extra paths: comma list replaces, bare shows, '-' clears",

@@ -435,7 +435,8 @@ def _draw_model_overlay(rows,
 
 def prompt_model_overlay(screen, models, *, presorted=False,
                          noun="models", preview_fn=None, navigate=False,
-                         prices=None, favorites=False):
+                         prices=None, favorites=False,
+                         on_move=None, initial=None):
     """interactive fuzzy picker. returns the selected item or None on
     cancel. used for the model list (sorted alphabetically) and the session
     list (presorted=True to preserve the caller's newest-first order).
@@ -446,7 +447,10 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     navigation (j/k, gg/G, /search) instead of a live fuzzy filter, so the
     preview only follows the cursor. prices, when given, maps model id -> price
     record for a right-aligned label. favorites=True enables a favorites
-    section on top (loaded/persisted client-side) with Tab to toggle."""
+    section on top (loaded/persisted client-side) with Tab to toggle.
+    on_move(item), when given, is called whenever the cursor lands on a
+    different item (and once for the first one) - a live preview hook.
+    initial is the item the cursor starts on."""
     if not models:
         return None
 
@@ -469,8 +473,14 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     search_buf = []
     filtered = _filter_and_sort(models, '', fav_set)
     selected_idx = 0
+    if initial is not None:
+        for i, item in enumerate(filtered):
+            if item[0] == initial:
+                selected_idx = i
+                break
     prev_lines = {}
     first_draw = [True]
+    moved_to = [None]
 
     # navigate-mode state (unused in fuzzy mode)
     search_mode = False
@@ -495,6 +505,11 @@ def prompt_model_overlay(screen, models, *, presorted=False,
             prices=prices, favorites=fav_arg,
         )
         first_draw[0] = False
+        if on_move is not None and filtered and 0 <= selected_idx < len(filtered):
+            current = filtered[selected_idx][0]
+            if current is not None and current != moved_to[0]:
+                moved_to[0] = current
+                on_move(current)
 
     frame = OverlayFrame(screen)
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')

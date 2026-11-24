@@ -1,0 +1,42 @@
+{
+  "name": "Old World",
+  "background": "#161617",
+  "foreground": "#c9c7cd",
+  "cursor": "#c9c7cd",
+  "ansi": {
+    "black": "#27272a",
+    "red": "#ea83a5",
+    "green": "#90b99f",
+    "yellow": "#e6b99d",
+    "blue": "#92a2d5",
+    "magenta": "#aca1cf",
+    "cyan": "#85b5ba",
+    "white": "#c9c7cd",
+    "bright_black": "#706e72",
+    "bright_red": "#daa5b9",
+    "bright_green": "#acc0b6",
+    "bright_yellow": "#d8c0b5",
+    "bright_blue": "#aeb4d1",
+    "bright_magenta": "#bab4ce",
+    "bright_cyan": "#a7bec4",
+    "bright_white": "#c9c7cd"
+  },
+  "ui": {
+    "accent": "#aca1cf",
+    "bar_background": "#313134",
+    "tab_text": "#9f9ca6",
+    "chip_pink": "#e29eca",
+    "chip_yellow": "#e6b99d",
+    "chip_green": "#90b99f"
+  },
+  "syntax": {
+    "comment": "#8b8693",
+    "keyword": "#aca1cf",
+    "string": "#90b99f",
+    "number": "#e29eca",
+    "function": "#92a2d5",
+    "builtin": "#85b5ba",
+    "deleted": "#ea83a5",
+    "code_text": "#c9c7cd"
+  }
+}

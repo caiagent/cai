@@ -3,6 +3,8 @@ prompts, models, sessions, pending, config, agents (with attach), tools, skills
 and the system prompt - each a picker over the agent client."""
 import os
 
+from cai import config
+from cai import theme
 from cai import usage
 from cai.events import EventType
 from cai.screen import Screen
@@ -429,10 +431,67 @@ def _list_setting(label, obj, attr):
                    set=write)
 
 
+def _set_theme(name):
+    """show theme `name` and save it as config.json's `theme`. returns an error
+    string - the theme shown before is kept and nothing is saved - or None."""
+    previous = theme.active()
+    try:
+        theme.apply(name)
+    except ValueError as e:
+        return str(e)
+    try:
+        config.save_optional("theme", name)
+    except (OSError, ValueError) as e:
+        try:
+            theme.apply(previous)
+        except ValueError:
+            theme.reset()
+        return f"not saved: {e}"
+    return None
+
+
+def _open_theme(screen):
+    """the :theme picker - each theme is shown live as the cursor lands on it.
+    Enter keeps it (saved to config.json); Esc puts the previous one back."""
+    previous = theme.active()
+    failed = {}
+
+    def preview(name):
+        try:
+            theme.apply(name)
+        except ValueError as e:
+            failed[name] = str(e)
+
+    picked = screen.prompt_theme_overlay(theme.list_themes(), current=previous, on_move=preview)
+    error = None
+    if picked is not None:
+        error = failed.get(picked) or _set_theme(picked)
+    if picked is None or error:
+        try:
+            theme.apply(previous)
+        except ValueError:
+            theme.reset()
+    if error:
+        screen.write(f"[theme: {error}]\n", kind=Screen.ERROR, block=True)
+
+
+def _theme_setting():
+    return Setting(label="theme (saved)",
+                   kind=overlay_config.CHOICE,
+                   get=theme.active,
+                   set=_set_theme,
+                   # h/l steps to the neighbour, so a theme that cannot load
+                   # would be a wall: it is left out here (:theme lists it and
+                   # says what is wrong with it).
+                   options=theme.usable_themes())
+
+
 def _open_config(screen, client, cfg):
     """the :config overlay - edit the env's live Settings (cai.settings) in
-    place. edits apply to this session only; permanent config lives in init.py."""
+    place. edits apply to this session only; permanent config lives in init.py.
+    the theme row is the exception: it is written to config.json."""
     settings = []
+    settings.append(_theme_setting())
     settings.append(_bool_setting("show reasoning", cfg, "show_reasoning"))
     settings.append(_int_setting("tool result max chars", cfg, "tool_result_max_chars"))
     settings.append(_bool_setting("auto save sessions", cfg, "auto_save_sessions"))

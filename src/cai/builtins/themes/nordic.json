@@ -1,0 +1,42 @@
+{
+  "name": "Nordic",
+  "background": "#242933",
+  "foreground": "#BBC3D4",
+  "cursor": "#D8DEE9",
+  "ansi": {
+    "black": "#191D24",
+    "red": "#BF616A",
+    "green": "#A3BE8C",
+    "yellow": "#EBCB8B",
+    "blue": "#81A1C1",
+    "magenta": "#B48EAD",
+    "cyan": "#8FBCBB",
+    "white": "#D8DEE9",
+    "bright_black": "#4C566A",
+    "bright_red": "#C5727A",
+    "bright_green": "#B1C89D",
+    "bright_yellow": "#EFD49F",
+    "bright_blue": "#88C0D0",
+    "bright_magenta": "#BE9DB8",
+    "bright_cyan": "#9FC6C5",
+    "bright_white": "#ECEFF4"
+  },
+  "ui": {
+    "accent": "#88C0D0",
+    "bar_background": "#3B4252",
+    "tab_text": "#BBC3D4",
+    "chip_pink": "#BE9DB8",
+    "chip_yellow": "#EBCB8B",
+    "chip_green": "#A3BE8C"
+  },
+  "syntax": {
+    "comment": "#60728A",
+    "keyword": "#D08770",
+    "string": "#A3BE8C",
+    "number": "#B48EAD",
+    "function": "#88C0D0",
+    "builtin": "#8FBCBB",
+    "deleted": "#BF616A",
+    "code_text": "#BBC3D4"
+  }
+}

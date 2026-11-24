@@ -1,0 +1,42 @@
+{
+  "name": "Bluloco Dark",
+  "background": "#282C34",
+  "foreground": "#ABB2BF",
+  "cursor": "#FFCC00",
+  "ansi": {
+    "black": "#42444d",
+    "red": "#fc2e51",
+    "green": "#25a45c",
+    "yellow": "#ff9369",
+    "blue": "#3375fe",
+    "magenta": "#9f7efe",
+    "cyan": "#4483aa",
+    "white": "#cdd3e0",
+    "bright_black": "#8f9aae",
+    "bright_red": "#ff637f",
+    "bright_green": "#3fc56a",
+    "bright_yellow": "#f9c858",
+    "bright_blue": "#10b0fe",
+    "bright_magenta": "#ff78f8",
+    "bright_cyan": "#5fb9bc",
+    "bright_white": "#ffffff"
+  },
+  "ui": {
+    "accent": "#10B1FE",
+    "bar_background": "#3a404c",
+    "tab_text": "#8f9aae",
+    "chip_pink": "#FF78F8",
+    "chip_yellow": "#F9C859",
+    "chip_green": "#3FC56B"
+  },
+  "syntax": {
+    "comment": "#636D83",
+    "keyword": "#10B1FE",
+    "string": "#F9C859",
+    "number": "#FF78F8",
+    "function": "#3FC56B",
+    "builtin": "#FF6480",
+    "deleted": "#fc2e51",
+    "code_text": "#ABB2BF"
+  }
+}
