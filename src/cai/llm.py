@@ -212,6 +212,24 @@ def _dispatch_tool(tools_dispatch, name, args):
     return str(result)
 
 
+def _retry_notifier(ui):
+    """the api's on_retry hook for a run: post each backoff wait to the human
+    through ui.notify, so a rate-limited or flaky request reads as waiting
+    rather than hung. may be called from the api's pump thread."""
+    def on_retry(info):
+        status = info['status']
+        if status == 429:
+            what = "rate limited (429)"
+        elif status is None:
+            what = "network error"
+        else:
+            what = f"server error ({status})"
+        ui.notify(f"{what}: retrying in {info['delay']:g}s "
+                  f"(attempt {info['attempt'] + 1} of {info['attempts']})",
+                  level="warning")
+    return on_retry
+
+
 def _turn(api,
           call_messages,
           model,
@@ -220,13 +238,16 @@ def _turn(api,
           reasoning_effort,
           temperature,
           stream,
-          interrupt):
+          interrupt,
+          ui=NULL_UI):
     """Run one model call, yielding content/reasoning events as they arrive.
     Returns (content, reasoning, tool_calls, usage). the interrupt is handed
     down to the api layer, which polls it while blocked on the network - so a
     kill bites mid-request, not just between streamed chunks (the check here
     covers an api without that support). a failed call raises ApiError out of
-    the api layer - it never reads as an empty answer."""
+    the api layer - it never reads as an empty answer. each retry the api
+    makes on the way is announced through ui.notify."""
+    on_retry = _retry_notifier(ui)
     if not stream:
         content, reasoning, tool_calls, usage = api.chat(call_messages,
                                                          current_model(model),
@@ -234,7 +255,8 @@ def _turn(api,
                                                          tool_choice=tool_choice,
                                                          reasoning_effort=reasoning_effort,
                                                          temperature=temperature,
-                                                         interrupt=interrupt)
+                                                         interrupt=interrupt,
+                                                         on_retry=on_retry)
         if reasoning:
             yield Event(type=EventType.REASONING, text=reasoning)
         if content:
@@ -252,7 +274,8 @@ def _turn(api,
                           reasoning_effort=reasoning_effort,
                           temperature=temperature,
                           stream=True,
-                          interrupt=interrupt)
+                          interrupt=interrupt,
+                          on_retry=on_retry)
     for delta_content, delta_reasoning, finished_tool_calls, chunk_usage in stream_gen:
         if _interrupted(interrupt): break
         if delta_reasoning:
@@ -539,7 +562,8 @@ def call_llm(messages,
                                                                  reasoning_effort,
                                                                  temperature,
                                                                  stream,
-                                                                 interrupt)
+                                                                 interrupt,
+                                                                 ui)
 
         if usage:
             yield Event(type=EventType.USAGE, usage=dict(usage))

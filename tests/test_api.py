@@ -414,6 +414,68 @@ def test_system_one_honors_retry_after(monkeypatch):
     assert waits == [4.0]
 
 
+def test_on_retry_is_told_of_each_backoff(monkeypatch):
+    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
+              requests.ConnectionError("down"),
+              FakeResponse(body=blocking_body(content="ok"))]
+    install(monkeypatch, script=script)
+    record_sleeps(monkeypatch)
+    seen = []
+    client().chat([], "m", on_retry=seen.append)
+    assert [(i['status'], i['attempt'], i['attempts'], i['delay']) for i in seen] == [
+        (429, 1, 5, 7.0), (None, 2, 3, 0)]
+
+
+def test_on_retry_reaches_the_polled_and_streaming_paths(monkeypatch):
+    for stream in (False, True):
+        script = [FakeResponse(status_code=503),
+                  FakeResponse(body=blocking_body(content="ok"),
+                               lines=[b"data: [DONE]"])]
+        install(monkeypatch, script=script)
+        seen = []
+        result = client().chat([], "m", stream=stream,
+                               interrupt=threading.Event(), on_retry=seen.append)
+        if stream:
+            list(result)
+        assert [i['status'] for i in seen] == [503]
+
+
+def test_raising_on_retry_does_not_fail_the_request(monkeypatch):
+    script = [FakeResponse(status_code=500), FakeResponse(body=blocking_body(content="ok"))]
+    install(monkeypatch, script=script)
+
+    def boom(info):
+        raise RuntimeError("bad hook")
+
+    content, _, _, _ = client().chat([], "m", on_retry=boom)
+    assert content == "ok"
+
+
+def test_loop_announces_retries_through_the_ui(monkeypatch):
+    from cai.llm import call_llm
+    from cai.ui import BaseUI
+
+    class NotingUI(BaseUI):
+        def __init__(self):
+            self.notes = []
+
+        def notify(self, message, *, level="info"):
+            self.notes.append((level, message))
+
+    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
+              FakeResponse(status_code=502),
+              FakeResponse(body=blocking_body(content="ok"))]
+    install(monkeypatch, script=script)
+    record_sleeps(monkeypatch)
+    ui = NotingUI()
+    messages = [{"role": "user", "content": "hi"}]
+    list(call_llm(messages, "m", client(), ui=ui, stream=False))
+    assert ui.notes == [
+        ("warning", "rate limited (429): retrying in 7s (attempt 2 of 5)"),
+        ("warning", "server error (502): retrying in 0s (attempt 3 of 3)"),
+    ]
+
+
 def test_blocking_non_200_exhausts_and_raises_with_status(monkeypatch):
     rec = install(monkeypatch, FakeResponse(status_code=500))
     with pytest.raises(ApiError) as err:

@@ -91,6 +91,23 @@ def _retry_delay(status, attempt, headers=None):
     return base * (2 ** (attempt - 1))
 
 
+def _announce_retry(on_retry, status, attempt, attempts, delay, error):
+    """tell the caller's on_retry hook a backoff wait is about to start. a
+    raising hook is logged and dropped - reporting must never fail a request."""
+    if on_retry is None:
+        return
+    info = {}
+    info['status'] = status
+    info['attempt'] = attempt
+    info['attempts'] = attempts
+    info['delay'] = delay
+    info['error'] = error
+    try:
+        on_retry(info)
+    except Exception:
+        log.exception("api: on_retry hook raised")
+
+
 def _price_per_mtok(value):
     """convert a per-token USD price (string or number) to USD per million
     tokens, or None when absent/unparseable. '0' is a real price (free)."""
@@ -229,7 +246,8 @@ class OpenAiApi:
              reasoning_effort=None,
              temperature=None,
              stream=False,
-             interrupt=None):
+             interrupt=None,
+             on_retry=None):
         """One chat-completion request. This is a dispatcher, not itself a
         generator, so its return shape depends on `stream`:
 
@@ -242,6 +260,11 @@ class OpenAiApi:
         either shape raises ApiError on failure: transient failures (network
         errors, 429/5xx) are retried up to self.retries attempts first, and a
         streaming request is only ever retried before its first byte was read.
+
+        `on_retry`, when given, is called just before each backoff wait with a
+        dict {status, attempt, attempts, delay, error} (status None for a
+        network failure), so a caller can tell the human a retry is under way
+        instead of looking hung. it may run on the pump thread.
 
         `system_prompt`, when given, is a ready-built message dict prepended
         to `messages`.
@@ -269,11 +292,11 @@ class OpenAiApi:
             data['stream'] = True
             data['stream_options'] = {"include_usage": True}
             if interrupt is None:
-                return self._stream(url, headers, data)
-            return self._stream_polled(url, headers, data, interrupt)
+                return self._stream(url, headers, data, on_retry=on_retry)
+            return self._stream_polled(url, headers, data, interrupt, on_retry)
         if interrupt is None:
-            return self._complete(url, headers, data)
-        return self._complete_polled(url, headers, data, interrupt)
+            return self._complete(url, headers, data, on_retry=on_retry)
+        return self._complete_polled(url, headers, data, interrupt, on_retry)
 
     def _get_data(self, url):
         """GET url and return its JSON 'data' list, or None on any failure
@@ -367,7 +390,8 @@ class OpenAiApi:
             if extra:
                 record.update(extra)
 
-    def _post_with_retry(self, url, headers, data, stream, interrupt=None):
+    def _post_with_retry(self, url, headers, data, stream, interrupt=None,
+                         on_retry=None):
         """POST one chat request, retrying the transient failures (network
         errors, 429/5xx) with a doubling backoff - a longer one, over more
         attempts (self.rate_limit_retries), for a 429 - or after the wait the
@@ -404,19 +428,20 @@ class OpenAiApi:
             delay = _retry_delay(status, attempt, reply_headers)
             log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
                         error, delay, attempt, attempts)
+            _announce_retry(on_retry, status, attempt, attempts, delay, error)
             if interrupt is None:
                 time.sleep(delay)
             elif interrupt.wait(delay):
                 raise ApiError(error, status=status)
 
-    def _complete(self, url, headers, data, interrupt=None):
+    def _complete(self, url, headers, data, interrupt=None, on_retry=None):
         """Blocking path: one POST (retried while transient), parse the single
         JSON body, return the (content, reasoning, tool_calls, usage) tuple. an
         unusable body raises ApiError - a failed call must never read as the
         model answering with an empty string. a call interrupted mid-POST
         discards the late response and returns empty content instead."""
         r = self._post_with_retry(url, headers, data, stream=False,
-                                  interrupt=interrupt)
+                                  interrupt=interrupt, on_retry=on_retry)
         if interrupt is not None and interrupt.is_set():
             r.close()
             return "", "", None, {}
@@ -440,7 +465,8 @@ class OpenAiApi:
 
         return content, reasoning, tool_calls, usage
 
-    def _stream(self, url, headers, data, interrupt=None, flight=None):
+    def _stream(self, url, headers, data, interrupt=None, flight=None,
+                on_retry=None):
         """Streaming path: POST with stream=True (retried while transient,
         before any byte was read), parse the SSE `data:` lines, reassemble
         tool-call argument fragments, and yield deltas as they arrive. The
@@ -456,7 +482,7 @@ class OpenAiApi:
         usage = {}
 
         r = self._post_with_retry(url, headers, data, stream=True,
-                                  interrupt=interrupt)
+                                  interrupt=interrupt, on_retry=on_retry)
         if flight is not None:
             flight.response = r
         if interrupt is not None and interrupt.is_set():
@@ -530,14 +556,14 @@ class OpenAiApi:
                     yield content, reasoning, finished_tool_calls, {}
             yield None, None, finished_tool_calls, usage
 
-    def _complete_polled(self, url, headers, data, interrupt):
+    def _complete_polled(self, url, headers, data, interrupt, on_retry=None):
         """_complete behind a pump thread: the POST blocks over there while
         this side polls, so a set interrupt returns at once - even while the
         pump is still deep in a socket recv. the pump discards a response that
         lands after the abort."""
         flight = _Flight()
         thread = threading.Thread(target=self._pump_complete,
-                                  args=(url, headers, data, interrupt, flight),
+                                  args=(url, headers, data, interrupt, flight, on_retry),
                                   daemon=True,
                                   name="cai-api-pump")
         thread.start()
@@ -553,14 +579,15 @@ class OpenAiApi:
                 raise value
             return value
 
-    def _pump_complete(self, url, headers, data, interrupt, flight):
+    def _pump_complete(self, url, headers, data, interrupt, flight, on_retry=None):
         try:
-            result = self._complete(url, headers, data, interrupt=interrupt)
+            result = self._complete(url, headers, data, interrupt=interrupt,
+                                    on_retry=on_retry)
             flight.queue.put(('done', result))
         except Exception as e:
             flight.queue.put(('error', e))
 
-    def _stream_polled(self, url, headers, data, interrupt):
+    def _stream_polled(self, url, headers, data, interrupt, on_retry=None):
         """_stream behind a pump thread: the pump reads the SSE lines and
         queues the yielded tuples while this generator polls the queue, so a
         set interrupt ends the stream within _POLL_TICK even while the pump is
@@ -568,7 +595,7 @@ class OpenAiApi:
         so the pump dies right away instead of running out the read timeout."""
         flight = _Flight()
         thread = threading.Thread(target=self._pump_stream,
-                                  args=(url, headers, data, interrupt, flight),
+                                  args=(url, headers, data, interrupt, flight, on_retry),
                                   daemon=True,
                                   name="cai-api-pump")
         thread.start()
@@ -590,9 +617,10 @@ class OpenAiApi:
             # closed the response and the abort is a no-op).
             _abort_flight(flight)
 
-    def _pump_stream(self, url, headers, data, interrupt, flight):
+    def _pump_stream(self, url, headers, data, interrupt, flight, on_retry=None):
         try:
-            for item in self._stream(url, headers, data, interrupt, flight):
+            for item in self._stream(url, headers, data, interrupt, flight,
+                                     on_retry=on_retry):
                 flight.queue.put(('item', item))
             flight.queue.put(('done', None))
         except Exception as e:
