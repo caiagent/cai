@@ -414,66 +414,123 @@ def test_system_one_honors_retry_after(monkeypatch):
     assert waits == [4.0]
 
 
-def test_on_retry_is_told_of_each_backoff(monkeypatch):
-    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
-              requests.ConnectionError("down"),
-              FakeResponse(body=blocking_body(content="ok"))]
-    install(monkeypatch, script=script)
-    record_sleeps(monkeypatch)
-    seen = []
-    client().chat([], "m", on_retry=seen.append)
-    assert [(i['status'], i['attempt'], i['attempts'], i['delay']) for i in seen] == [
-        (429, 1, 5, 7.0), (None, 2, 3, 0)]
+def test_retry_false_makes_one_attempt_and_flags_the_error(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(status_code=429, headers={"Retry-After": "7"}))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m", retry=False)
+    assert len(rec.calls) == 1
+    assert err.value.retryable is True
+    assert err.value.retry_after == 7.0
 
 
-def test_on_retry_reaches_the_polled_and_streaming_paths(monkeypatch):
+def test_retry_false_reaches_the_polled_and_streaming_paths(monkeypatch):
     for stream in (False, True):
-        script = [FakeResponse(status_code=503),
-                  FakeResponse(body=blocking_body(content="ok"),
-                               lines=[b"data: [DONE]"])]
-        install(monkeypatch, script=script)
-        seen = []
-        result = client().chat([], "m", stream=stream,
-                               interrupt=threading.Event(), on_retry=seen.append)
-        if stream:
-            list(result)
-        assert [i['status'] for i in seen] == [503]
+        rec = install(monkeypatch, FakeResponse(status_code=503))
+        with pytest.raises(ApiError) as err:
+            result = client().chat([], "m", stream=stream,
+                                   interrupt=threading.Event(), retry=False)
+            if stream:
+                list(result)
+        assert len(rec.calls) == 1
+        assert err.value.retryable is True
 
 
-def test_raising_on_retry_does_not_fail_the_request(monkeypatch):
-    script = [FakeResponse(status_code=500), FakeResponse(body=blocking_body(content="ok"))]
-    install(monkeypatch, script=script)
+def test_permanent_and_body_failures_are_not_retryable(monkeypatch):
+    install(monkeypatch, FakeResponse(status_code=400))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m", retry=False)
+    assert err.value.retryable is False
+    install(monkeypatch, FakeResponse(raise_json=True))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m", retry=False)
+    assert err.value.retryable is False
 
-    def boom(info):
-        raise RuntimeError("bad hook")
 
-    content, _, _, _ = client().chat([], "m", on_retry=boom)
-    assert content == "ok"
+def test_retry_wait_is_the_policy(monkeypatch):
+    monkeypatch.setattr(api, "_RATE_LIMIT_BACKOFF", 5.0)
+    monkeypatch.setattr(api, "_RETRY_BACKOFF", 0.5)
+    c = client()
+    limited = ApiError("x", status=429, retryable=True)
+    assert c.retry_wait(limited, 1) == (5.0, 5)
+    assert c.retry_wait(limited, 4) == (40.0, 5)
+    assert c.retry_wait(limited, 5) is None
+    asked = ApiError("x", status=429, retryable=True, retry_after=7.0)
+    assert c.retry_wait(asked, 2) == (7.0, 5)
+    flaky = ApiError("x", status=502, retryable=True)
+    assert c.retry_wait(flaky, 2) == (1.0, 3)
+    assert c.retry_wait(flaky, 3) is None
+    assert c.retry_wait(ApiError("x", status=400), 1) is None
 
 
-def test_loop_announces_retries_through_the_ui(monkeypatch):
+def _run_loop(monkeypatch, script, stream, interrupt=None):
+    """drive call_llm over a scripted api; returns (events, waits, calls)."""
     from cai.llm import call_llm
-    from cai.ui import BaseUI
 
-    class NotingUI(BaseUI):
-        def __init__(self):
-            self.notes = []
-
-        def notify(self, message, *, level="info"):
-            self.notes.append((level, message))
-
-    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
-              FakeResponse(status_code=502),
-              FakeResponse(body=blocking_body(content="ok"))]
-    install(monkeypatch, script=script)
-    record_sleeps(monkeypatch)
-    ui = NotingUI()
+    rec = install(monkeypatch, script=script)
+    waits = record_sleeps(monkeypatch)
     messages = [{"role": "user", "content": "hi"}]
-    list(call_llm(messages, "m", client(), ui=ui, stream=False))
-    assert ui.notes == [
-        ("warning", "rate limited (429): retrying in 7s (attempt 2 of 5)"),
-        ("warning", "server error (502): retrying in 0s (attempt 3 of 3)"),
-    ]
+    events = list(call_llm(messages, "m", client(), stream=stream, interrupt=interrupt))
+    return events, waits, rec.calls
+
+
+def test_loop_yields_a_retry_event_before_each_wait(monkeypatch):
+    for stream in (False, True):
+        script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
+                  FakeResponse(status_code=502),
+                  FakeResponse(body=blocking_body(content="ok"),
+                               lines=[sse({"choices": [{"delta": {"content": "ok"}}]}),
+                                      b"data: [DONE]"])]
+        events, waits, calls = _run_loop(monkeypatch, script, stream)
+        assert len(calls) == 3
+        assert waits == [7.0, 0]
+        assert [e.type for e in events][:3] == ["retry", "retry", "content"]
+        assert events[0].text == "rate limited (429): retrying in 7s (attempt 2 of 5)"
+        assert events[0].retry['status'] == 429
+        assert events[0].retry['attempt'] == 2
+        assert events[0].retry['attempts'] == 5
+        assert events[0].retry['delay'] == 7.0
+        assert events[1].text == "server error (502): retrying in 0s (attempt 3 of 3)"
+
+
+def test_loop_raises_once_the_attempts_run_out(monkeypatch):
+    from cai.llm import call_llm
+
+    rec = install(monkeypatch, FakeResponse(status_code=500))
+    record_sleeps(monkeypatch)
+    events = []
+    with pytest.raises(ApiError) as err:
+        for event in call_llm([{"role": "user", "content": "hi"}], "m", client(),
+                              stream=False):
+            events.append(event)
+    assert err.value.status == 500
+    assert len(rec.calls) == 3
+    assert [e.type for e in events] == ["retry", "retry"]
+
+
+def test_loop_interrupt_during_the_wait_ends_the_run(monkeypatch):
+    interrupt = threading.Event()
+    rec = install(monkeypatch, FakeResponse(status_code=429))
+    monkeypatch.setattr(api, "_RATE_LIMIT_BACKOFF", 30.0)
+    from cai.llm import call_llm
+
+    seen = []
+    for event in call_llm([{"role": "user", "content": "hi"}], "m", client(),
+                          stream=False, interrupt=interrupt):
+        seen.append(event.type)
+        interrupt.set()           # the human hits stop while it waits
+    assert seen == ["retry"]
+    assert len(rec.calls) == 1
+
+
+def test_retry_event_round_trips_over_the_wire():
+    from cai.events import Event, EventType
+    from cai.wire import Wire
+
+    event = Event(type=EventType.RETRY, text="waiting", retry={"delay": 5.0, "status": 429})
+    back = Wire.event_from_dict(json.loads(Wire.encode(Wire.event_to_dict(event))))
+    assert back.type == EventType.RETRY
+    assert back.text == "waiting"
+    assert back.retry == {"delay": 5.0, "status": 429}
 
 
 def test_blocking_non_200_exhausts_and_raises_with_status(monkeypatch):

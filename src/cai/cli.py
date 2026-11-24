@@ -594,7 +594,7 @@ def _diag_tool_call(tool_name, tool_args):
 
 def _drive(run, show_reasoning=True):
     """consume the run, routing output, and print the final answer. returns the
-    process exit code. a run that fails for good (ApiError after the api layer's
+    process exit code. a run that fails for good (ApiError after the loop's
     retries, or an LLMError like max_steps / strict-format exhaustion) prints
     one error line to stderr and exits 1 - never a silent empty answer."""
     from cai.api import ApiError
@@ -612,6 +612,10 @@ def _drive(run, show_reasoning=True):
                 _diag_tool_call(event.tool_name, event.tool_args)
             elif event.type == EventType.TOOL_RESULT:
                 _diag(f"  <- {event.tool_name}: {len(event.tool_result or '')} chars")
+            elif event.type == EventType.RETRY:
+                # not gated on a tty like the other diagnostics: a piped run
+                # waiting out a rate limit should say so in its stderr log.
+                print(f"[{event.text}]", file=sys.stderr, flush=True)
     except KeyboardInterrupt:
         run.interrupt.set()
         _diag("[interrupted]")

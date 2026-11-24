@@ -21,6 +21,7 @@ class EventType(str, Enum):
     TOOL_CALL = "tool_call"      # the model asked to run a tool
     TOOL_RESULT = "tool_result"  # a tool finished
     USAGE = "usage"              # token accounting for a turn (usage)
+    RETRY = "retry"              # a model call failed; waiting to try again
 
     def __str__(self):
         return self.value
@@ -38,6 +39,9 @@ class Event:
       tool_call   - tool_name / tool_args / tool_call_id
       tool_result - tool_name / tool_result / tool_call_id / is_error
       usage       - usage
+      retry       - text (a ready-to-show line) / retry: {status (None for a
+                    network failure), attempt (the one coming up), attempts,
+                    delay (seconds the loop now waits), error}
     """
     type: str
     text: Optional[str] = None
@@ -48,3 +52,4 @@ class Event:
     is_error: bool = False
     usage: Optional[dict] = None
     origin: Optional[str] = None
+    retry: Optional[dict] = None

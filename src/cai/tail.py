@@ -148,6 +148,9 @@ class _Printer:
         if event.type == EventType.TOOL_RESULT:
             self.line(f"  <- {event.tool_name}: {len(event.tool_result or '')} chars")
             return
+        if event.type == EventType.RETRY:
+            self.line(f"[{event.text}]")
+            return
 
 
 def _replay(printer, messages):

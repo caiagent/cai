@@ -289,6 +289,7 @@ class Wire:
         out["is_error"] = event.is_error
         out["usage"] = event.usage
         out["origin"] = event.origin
+        out["retry"] = event.retry
         return out
 
     @staticmethod
@@ -303,4 +304,5 @@ class Wire:
         event.is_error = data.get("is_error", False)
         event.usage = data.get("usage")
         event.origin = data.get("origin")
+        event.retry = data.get("retry")
         return event

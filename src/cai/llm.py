@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, RunGate, ToolCall
@@ -212,22 +213,24 @@ def _dispatch_tool(tools_dispatch, name, args):
     return str(result)
 
 
-def _retry_notifier(ui):
-    """the api's on_retry hook for a run: post each backoff wait to the human
-    through ui.notify, so a rate-limited or flaky request reads as waiting
-    rather than hung. may be called from the api's pump thread."""
-    def on_retry(info):
-        status = info['status']
-        if status == 429:
-            what = "rate limited (429)"
-        elif status is None:
-            what = "network error"
-        else:
-            what = f"server error ({status})"
-        ui.notify(f"{what}: retrying in {info['delay']:g}s "
-                  f"(attempt {info['attempt'] + 1} of {info['attempts']})",
-                  level="warning")
-    return on_retry
+def _retry_event(error, attempt, attempts, delay):
+    """the RETRY event for a model call that failed on `attempt` and is about
+    to be tried again after `delay` seconds."""
+    status = error.status
+    if status == 429:
+        what = "rate limited (429)"
+    elif status is None:
+        what = "network error"
+    else:
+        what = f"server error ({status})"
+    retry = {}
+    retry['status'] = status
+    retry['attempt'] = attempt + 1
+    retry['attempts'] = attempts
+    retry['delay'] = delay
+    retry['error'] = str(error)
+    text = f"{what}: retrying in {delay:g}s (attempt {attempt + 1} of {attempts})"
+    return Event(type=EventType.RETRY, text=text, retry=retry)
 
 
 def _turn(api,
@@ -238,56 +241,146 @@ def _turn(api,
           reasoning_effort,
           temperature,
           stream,
-          interrupt,
-          ui=NULL_UI):
-    """Run one model call, yielding content/reasoning events as they arrive.
-    Returns (content, reasoning, tool_calls, usage). the interrupt is handed
-    down to the api layer, which polls it while blocked on the network - so a
-    kill bites mid-request, not just between streamed chunks (the check here
-    covers an api without that support). a failed call raises ApiError out of
-    the api layer - it never reads as an empty answer. each retry the api
-    makes on the way is announced through ui.notify."""
-    on_retry = _retry_notifier(ui)
-    if not stream:
-        content, reasoning, tool_calls, usage = api.chat(call_messages,
-                                                         current_model(model),
-                                                         tools=current_tools(tools),
-                                                         tool_choice=tool_choice,
-                                                         reasoning_effort=reasoning_effort,
-                                                         temperature=temperature,
-                                                         interrupt=interrupt,
-                                                         on_retry=on_retry)
-        if reasoning:
-            yield Event(type=EventType.REASONING, text=reasoning)
-        if content:
-            yield Event(type=EventType.CONTENT, text=content)
-        return content or "", reasoning or "", tool_calls, usage or {}
+          interrupt):
+    """Ask the model once, and keep asking while the failure is temporary.
 
+    yields the content/reasoning events as they arrive and returns
+    (content, reasoning, tool_calls, usage).
+
+    in plain steps:
+      1. send the request (_attempt).
+      2. it worked -> return the answer.
+      3. it failed for good (bad key, bad request, out of attempts) -> the
+         ApiError goes up to the caller. a failure never reads as an empty
+         answer.
+      4. it failed for now (rate limit, server hiccup, network) -> yield a
+         RETRY event so the human sees why nothing is happening, wait, and go
+         back to step 1.
+
+    the api decides what "for now" means and how long to wait (retry_wait);
+    this function only does the waiting, because only the loop can yield
+    events. an interrupt during the wait ends the turn with an empty answer."""
+    # imported here, not at module level: cai.api pulls in requests, which
+    # this module otherwise never needs.
+    from cai.api import ApiError
+
+    attempt = 0
+    while True:
+        attempt += 1
+
+        # steps 1-2: one request. a temporary failure can only happen before
+        # the model sent anything, so no event of a failed attempt was yielded.
+        try:
+            answer = yield from _attempt(api,
+                                         call_messages,
+                                         model,
+                                         tools,
+                                         tool_choice,
+                                         reasoning_effort,
+                                         temperature,
+                                         stream,
+                                         interrupt)
+            return answer
+        except ApiError as e:
+            error = e
+
+        # step 3: give up when the api says this failure is final.
+        wait = api.retry_wait(error, attempt)
+        if wait is None:
+            raise error
+        delay, attempts = wait
+
+        # step 4: say so, wait, try again.
+        event = _retry_event(error, attempt, attempts, delay)
+        log.warning("llm: %s", event.text)
+        yield event
+
+        interrupted = _sleep(delay, interrupt)
+        if interrupted:
+            return "", "", None, {}
+
+
+def _sleep(seconds, interrupt):
+    """wait `seconds`, waking early if the run is interrupted. returns True
+    when it was."""
+    if interrupt is None:
+        time.sleep(seconds)
+        return False
+    return interrupt.wait(seconds)
+
+
+def _attempt(api,
+             call_messages,
+             model,
+             tools,
+             tool_choice,
+             reasoning_effort,
+             temperature,
+             stream,
+             interrupt):
+    """Send the request to the model exactly once - no retrying here, that is
+    _turn's job (retry=False tells the api the same).
+
+    yields the content/reasoning events and returns
+    (content, reasoning, tool_calls, usage). the answer comes back either in
+    one piece or streamed chunk by chunk, depending on `stream`."""
+    request = {}
+    request['tools'] = current_tools(tools)
+    request['tool_choice'] = tool_choice
+    request['reasoning_effort'] = reasoning_effort
+    request['temperature'] = temperature
+    # handed down so a kill bites while the api is blocked on the network.
+    request['interrupt'] = interrupt
+    request['retry'] = False
+
+    if stream:
+        answer = yield from _streamed_answer(api, call_messages, model, request, interrupt)
+    else:
+        answer = yield from _whole_answer(api, call_messages, model, request)
+    return answer
+
+
+def _whole_answer(api, call_messages, model, request):
+    """the non-streaming request: wait for the full answer, then yield it as
+    one reasoning event and one content event."""
+    content, reasoning, tool_calls, usage = api.chat(call_messages,
+                                                     current_model(model),
+                                                     **request)
+    if reasoning:
+        yield Event(type=EventType.REASONING, text=reasoning)
+    if content:
+        yield Event(type=EventType.CONTENT, text=content)
+    return content or "", reasoning or "", tool_calls, usage or {}
+
+
+def _streamed_answer(api, call_messages, model, request, interrupt):
+    """the streaming request: yield each chunk as it arrives and piece the
+    full answer together along the way. the tool calls and the usage only
+    come at the end of the stream."""
     content_parts = []
     reasoning_parts = []
     tool_calls = None
     usage = {}
-    stream_gen = api.chat(call_messages,
-                          current_model(model),
-                          tools=current_tools(tools),
-                          tool_choice=tool_choice,
-                          reasoning_effort=reasoning_effort,
-                          temperature=temperature,
-                          stream=True,
-                          interrupt=interrupt,
-                          on_retry=on_retry)
-    for delta_content, delta_reasoning, finished_tool_calls, chunk_usage in stream_gen:
+
+    chunks = api.chat(call_messages,
+                      current_model(model),
+                      stream=True,
+                      **request)
+    for content, reasoning, finished_tool_calls, chunk_usage in chunks:
+        # the api stops the stream on an interrupt itself; this check covers
+        # an api without that support.
         if _interrupted(interrupt): break
-        if delta_reasoning:
-            reasoning_parts.append(delta_reasoning)
-            yield Event(type=EventType.REASONING, text=delta_reasoning)
-        if delta_content:
-            content_parts.append(delta_content)
-            yield Event(type=EventType.CONTENT, text=delta_content)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+            yield Event(type=EventType.REASONING, text=reasoning)
+        if content:
+            content_parts.append(content)
+            yield Event(type=EventType.CONTENT, text=content)
         if finished_tool_calls is not None:
             tool_calls = finished_tool_calls
         if chunk_usage:
             usage = chunk_usage
+
     return "".join(content_parts), "".join(reasoning_parts), tool_calls, usage
 
 
@@ -509,8 +602,8 @@ def call_llm(messages,
                  instead of waiting for the next run. None = no steering.
     Returns the final assistant text (as the generator's return value).
 
-    a model call that fails for good raises cai.api.ApiError (the api layer
-    retries the transient cases first). the failed turn appends nothing, so
+    a model call that fails for good raises cai.api.ApiError (the transient
+    cases are retried first, each wait announced by a RETRY event). the failed turn appends nothing, so
     `messages` is left at its pre-turn state and a resubmit is clean - only
     steering texts already folded in (real user turns) remain."""
     hooks = _as_registry(hooks)
@@ -562,8 +655,7 @@ def call_llm(messages,
                                                                  reasoning_effort,
                                                                  temperature,
                                                                  stream,
-                                                                 interrupt,
-                                                                 ui)
+                                                                 interrupt)
 
         if usage:
             yield Event(type=EventType.USAGE, usage=dict(usage))

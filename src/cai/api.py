@@ -40,11 +40,20 @@ class ApiError(Exception):
 
     this is the api layer's whole error surface: OpenAiApi.chat() and
     SystemOneApi.system_one() raise it instead of returning a sentinel, so a
-    failed call can never read as the model answering with an empty string."""
+    failed call can never read as the model answering with an empty string.
 
-    def __init__(self, message, status=None):
+    `retryable` says the failure was a transient one that hit before any
+    response body was read, so sending the same request again is safe and may
+    work; `retry_after` is the wait the server asked for (seconds, already
+    clamped), when it sent one. OpenAiApi.retry_wait() turns the two into the
+    next backoff - what a caller that passed retry=False drives its own retry
+    loop with."""
+
+    def __init__(self, message, status=None, retryable=False, retry_after=None):
         super().__init__(message)
         self.status = status
+        self.retryable = retryable
+        self.retry_after = retry_after
 
 
 def _retryable(status):
@@ -79,33 +88,23 @@ def _parse_retry_after(value):
     return max(0.0, seconds)
 
 
-def _retry_delay(status, attempt, headers=None):
-    """seconds to wait after failed attempt number `attempt` (1-based). a
-    server-sent Retry-After wins (clamped to _RETRY_AFTER_MAX); otherwise a
-    doubling backoff, from a longer base when the failure was a 429."""
-    if headers is not None:
-        asked = _parse_retry_after(headers.get('Retry-After'))
-        if asked is not None:
-            return min(asked, _RETRY_AFTER_MAX)
+def _asked_wait(headers):
+    """the wait a response's Retry-After header asks for, in seconds and
+    clamped to _RETRY_AFTER_MAX, or None when it carries none."""
+    asked = _parse_retry_after(headers.get('Retry-After'))
+    if asked is None:
+        return None
+    return min(asked, _RETRY_AFTER_MAX)
+
+
+def _retry_delay(status, attempt, retry_after=None):
+    """seconds to wait after failed attempt number `attempt` (1-based). the
+    wait the server asked for wins; otherwise a doubling backoff, from a
+    longer base when the failure was a 429."""
+    if retry_after is not None:
+        return retry_after
     base = _RATE_LIMIT_BACKOFF if status == 429 else _RETRY_BACKOFF
     return base * (2 ** (attempt - 1))
-
-
-def _announce_retry(on_retry, status, attempt, attempts, delay, error):
-    """tell the caller's on_retry hook a backoff wait is about to start. a
-    raising hook is logged and dropped - reporting must never fail a request."""
-    if on_retry is None:
-        return
-    info = {}
-    info['status'] = status
-    info['attempt'] = attempt
-    info['attempts'] = attempts
-    info['delay'] = delay
-    info['error'] = error
-    try:
-        on_retry(info)
-    except Exception:
-        log.exception("api: on_retry hook raised")
 
 
 def _price_per_mtok(value):
@@ -247,7 +246,7 @@ class OpenAiApi:
              temperature=None,
              stream=False,
              interrupt=None,
-             on_retry=None):
+             retry=True):
         """One chat-completion request. This is a dispatcher, not itself a
         generator, so its return shape depends on `stream`:
 
@@ -261,10 +260,10 @@ class OpenAiApi:
         errors, 429/5xx) are retried up to self.retries attempts first, and a
         streaming request is only ever retried before its first byte was read.
 
-        `on_retry`, when given, is called just before each backoff wait with a
-        dict {status, attempt, attempts, delay, error} (status None for a
-        network failure), so a caller can tell the human a retry is under way
-        instead of looking hung. it may run on the pump thread.
+        `retry=False` makes a single attempt: a transient failure raises
+        ApiError at once, flagged `retryable`, and the caller runs the retry
+        loop itself with retry_wait() - how the agentic loop surfaces every
+        backoff as an event instead of blocking silently in here.
 
         `system_prompt`, when given, is a ready-built message dict prepended
         to `messages`.
@@ -292,11 +291,11 @@ class OpenAiApi:
             data['stream'] = True
             data['stream_options'] = {"include_usage": True}
             if interrupt is None:
-                return self._stream(url, headers, data, on_retry=on_retry)
-            return self._stream_polled(url, headers, data, interrupt, on_retry)
+                return self._stream(url, headers, data, retry=retry)
+            return self._stream_polled(url, headers, data, interrupt, retry)
         if interrupt is None:
-            return self._complete(url, headers, data, on_retry=on_retry)
-        return self._complete_polled(url, headers, data, interrupt, on_retry)
+            return self._complete(url, headers, data, retry=retry)
+        return self._complete_polled(url, headers, data, interrupt, retry)
 
     def _get_data(self, url):
         """GET url and return its JSON 'data' list, or None on any failure
@@ -390,8 +389,23 @@ class OpenAiApi:
             if extra:
                 record.update(extra)
 
+    def retry_wait(self, error, attempt):
+        """the retry policy, for one failed attempt: (seconds to wait before
+        the next attempt, the attempt budget), or None when `error` is final -
+        not a transient failure, or the budget (self.retries, or
+        self.rate_limit_retries for a 429) is spent. `attempt` counts the
+        attempts made so far, the failed one included."""
+        if not error.retryable:
+            return None
+        attempts = self.retries
+        if error.status == 429:
+            attempts = self.rate_limit_retries
+        if attempt >= attempts:
+            return None
+        return _retry_delay(error.status, attempt, error.retry_after), attempts
+
     def _post_with_retry(self, url, headers, data, stream, interrupt=None,
-                         on_retry=None):
+                         retry=True):
         """POST one chat request, retrying the transient failures (network
         errors, 429/5xx) with a doubling backoff - a longer one, over more
         attempts (self.rate_limit_retries), for a 429 - or after the wait the
@@ -400,12 +414,13 @@ class OpenAiApi:
         failure. a streaming caller gets the response back before any body was
         read, so a retry here never duplicates streamed output. a set
         interrupt cuts the backoff wait short and gives up instead of retrying
-        into a run nobody wants anymore."""
+        into a run nobody wants anymore. retry=False stops after the first
+        attempt, leaving the retry loop to the caller."""
         attempt = 0
         while True:
             attempt += 1
             status = None
-            reply_headers = None
+            retry_after = None
             try:
                 r = requests.post(url,
                                   headers=headers,
@@ -414,34 +429,39 @@ class OpenAiApi:
                                   timeout=self.timeout,
                                   verify=self.ssl_verify)
             except requests.RequestException as e:
-                error = f"request {url} failed: {e}"
+                message = f"request {url} failed: {e}"
             else:
                 if r.status_code == 200:
                     return r
                 status = r.status_code
-                reply_headers = r.headers
-                error = f"request {url} failed with {status}: {r.text[:300]}"
+                retry_after = _asked_wait(r.headers)
+                message = f"request {url} failed with {status}: {r.text[:300]}"
                 r.close()
-            attempts = self.rate_limit_retries if status == 429 else self.retries
-            if not _retryable(status) or attempt >= attempts:
-                raise ApiError(error, status=status)
-            delay = _retry_delay(status, attempt, reply_headers)
+            error = ApiError(message,
+                             status=status,
+                             retryable=_retryable(status),
+                             retry_after=retry_after)
+            wait = None
+            if retry:
+                wait = self.retry_wait(error, attempt)
+            if wait is None:
+                raise error
+            delay, attempts = wait
             log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
-                        error, delay, attempt, attempts)
-            _announce_retry(on_retry, status, attempt, attempts, delay, error)
+                        message, delay, attempt, attempts)
             if interrupt is None:
                 time.sleep(delay)
             elif interrupt.wait(delay):
-                raise ApiError(error, status=status)
+                raise error
 
-    def _complete(self, url, headers, data, interrupt=None, on_retry=None):
+    def _complete(self, url, headers, data, interrupt=None, retry=True):
         """Blocking path: one POST (retried while transient), parse the single
         JSON body, return the (content, reasoning, tool_calls, usage) tuple. an
         unusable body raises ApiError - a failed call must never read as the
         model answering with an empty string. a call interrupted mid-POST
         discards the late response and returns empty content instead."""
         r = self._post_with_retry(url, headers, data, stream=False,
-                                  interrupt=interrupt, on_retry=on_retry)
+                                  interrupt=interrupt, retry=retry)
         if interrupt is not None and interrupt.is_set():
             r.close()
             return "", "", None, {}
@@ -466,7 +486,7 @@ class OpenAiApi:
         return content, reasoning, tool_calls, usage
 
     def _stream(self, url, headers, data, interrupt=None, flight=None,
-                on_retry=None):
+                retry=True):
         """Streaming path: POST with stream=True (retried while transient,
         before any byte was read), parse the SSE `data:` lines, reassemble
         tool-call argument fragments, and yield deltas as they arrive. The
@@ -482,7 +502,7 @@ class OpenAiApi:
         usage = {}
 
         r = self._post_with_retry(url, headers, data, stream=True,
-                                  interrupt=interrupt, on_retry=on_retry)
+                                  interrupt=interrupt, retry=retry)
         if flight is not None:
             flight.response = r
         if interrupt is not None and interrupt.is_set():
@@ -556,14 +576,14 @@ class OpenAiApi:
                     yield content, reasoning, finished_tool_calls, {}
             yield None, None, finished_tool_calls, usage
 
-    def _complete_polled(self, url, headers, data, interrupt, on_retry=None):
+    def _complete_polled(self, url, headers, data, interrupt, retry=True):
         """_complete behind a pump thread: the POST blocks over there while
         this side polls, so a set interrupt returns at once - even while the
         pump is still deep in a socket recv. the pump discards a response that
         lands after the abort."""
         flight = _Flight()
         thread = threading.Thread(target=self._pump_complete,
-                                  args=(url, headers, data, interrupt, flight, on_retry),
+                                  args=(url, headers, data, interrupt, flight, retry),
                                   daemon=True,
                                   name="cai-api-pump")
         thread.start()
@@ -579,15 +599,15 @@ class OpenAiApi:
                 raise value
             return value
 
-    def _pump_complete(self, url, headers, data, interrupt, flight, on_retry=None):
+    def _pump_complete(self, url, headers, data, interrupt, flight, retry=True):
         try:
             result = self._complete(url, headers, data, interrupt=interrupt,
-                                    on_retry=on_retry)
+                                    retry=retry)
             flight.queue.put(('done', result))
         except Exception as e:
             flight.queue.put(('error', e))
 
-    def _stream_polled(self, url, headers, data, interrupt, on_retry=None):
+    def _stream_polled(self, url, headers, data, interrupt, retry=True):
         """_stream behind a pump thread: the pump reads the SSE lines and
         queues the yielded tuples while this generator polls the queue, so a
         set interrupt ends the stream within _POLL_TICK even while the pump is
@@ -595,7 +615,7 @@ class OpenAiApi:
         so the pump dies right away instead of running out the read timeout."""
         flight = _Flight()
         thread = threading.Thread(target=self._pump_stream,
-                                  args=(url, headers, data, interrupt, flight, on_retry),
+                                  args=(url, headers, data, interrupt, flight, retry),
                                   daemon=True,
                                   name="cai-api-pump")
         thread.start()
@@ -617,10 +637,10 @@ class OpenAiApi:
             # closed the response and the abort is a no-op).
             _abort_flight(flight)
 
-    def _pump_stream(self, url, headers, data, interrupt, flight, on_retry=None):
+    def _pump_stream(self, url, headers, data, interrupt, flight, retry=True):
         try:
             for item in self._stream(url, headers, data, interrupt, flight,
-                                     on_retry=on_retry):
+                                     retry=retry):
                 flight.queue.put(('item', item))
             flight.queue.put(('done', None))
         except Exception as e:
@@ -722,7 +742,7 @@ class SystemOneApi:
             attempts = self.rate_limit_retries if status == 429 else self.retries
             if not _retryable(status) or attempt >= attempts:
                 raise ApiError(error, status=status)
-            delay = _retry_delay(status, attempt, reply_headers)
+            delay = _retry_delay(status, attempt, _asked_wait(reply_headers))
             log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
                         error, delay, attempt, attempts)
             time.sleep(delay)

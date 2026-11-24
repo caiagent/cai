@@ -78,6 +78,9 @@ class _Transcript:
             result = event.tool_result or ""
             self._stream(f"<- {event.tool_name}: {len(result)} chars\n", "tool", kind)
             return
+        if event.type == EventType.RETRY:
+            self.note(f"[{event.text}]\n", Screen.META)
+            return
 
     def _stream(self, text, unit, kind, final=False):
         # a fresh unit starts a new block; the same unit continues the open
