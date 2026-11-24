@@ -45,26 +45,22 @@ def _open_messages(screen, client, status):
         client.set_messages(edited)
 
 
-def _open_requests(screen, client):
-    """open the :requests overlay: the HTTP requests this session's agent sent
-    to the model server, read live over the wire. nothing is stored - the
-    agent only remembers its most recent ones, in memory."""
-    if not client.get_requests():
-        screen.write("[no requests yet]\n", kind=Screen.META, block=True)
-        return
-    screen.prompt_requests_overlay(client.get_requests, client.get_request)
-
-
-def _open_agent_requests(screen, name, title):
-    """the :requests overlay for another agent (a sub-agent being watched),
-    read over that agent's own socket."""
+def _open_requests(screen, requests, agent_name, title="Requests"):
+    """open the :requests overlay: the HTTP requests one agent sent to the
+    model server. `requests` is the TUI's RequestStore (cai.tui.requests) -
+    the recent ones it kept in memory, nothing stored on disk - and
+    agent_name picks whose to show: the session's own agent, or a sub-agent
+    being watched."""
     def _fetch():
-        return _agent_control(name, "get_requests") or []
+        return requests.summaries(agent_name)
 
     def _detail(id):
-        return _agent_control(name, "get_request", id)
+        return requests.detail(agent_name, id)
 
-    screen.prompt_requests_overlay(_fetch, _detail, title=f"Requests · {title}")
+    if not _fetch():
+        screen.write("[no requests kept for this agent]\n", kind=Screen.META, block=True)
+        return
+    screen.prompt_requests_overlay(_fetch, _detail, title=title)
 
 
 def _history_node_label(node):
@@ -446,7 +442,7 @@ def _open_config(screen, client, cfg):
     screen.prompt_config_overlay(settings)
 
 
-def _attach_agent(screen, node, cfg, stop_fn, limit_fn=None):
+def _attach_agent(screen, node, cfg, stop_fn, requests, limit_fn=None):
     """watch one live agent from the :agents view: attach a read-only wire to
     its socket and mirror its conversation full-screen - the stored messages
     first (get_messages over a short-lived control connection), then the run's
@@ -527,7 +523,7 @@ def _attach_agent(screen, node, cfg, stop_fn, limit_fn=None):
                 pass
         attached = True
         if action == "requests":
-            _open_agent_requests(screen, name, title)
+            _open_requests(screen, requests, name, f"Requests · {title}")
             continue
         if action != "messages":
             return True
@@ -557,7 +553,7 @@ def _conversation_tail(messages, width, max_lines, cfg=None):
     return view.get_lines(max(0, total - max_lines), max_lines)
 
 
-def _open_agents(screen, client, cfg, status=None):
+def _open_agents(screen, client, cfg, requests, status=None):
     """open the live sub-agents tree, built solely from the agents sockets. each
     live agent answers get_info (name, model, the ids of its children); the tree
     is linked from those children lists, and a child with no live socket of its
@@ -675,7 +671,7 @@ def _open_agents(screen, client, cfg, status=None):
         limit_fn = None
         if status is not None:
             limit_fn = status.limit_for
-        if chosen.get("live") and _attach_agent(screen, chosen, cfg, _stop, limit_fn):
+        if chosen.get("live") and _attach_agent(screen, chosen, cfg, _stop, requests, limit_fn):
             continue
         messages = _messages_for(chosen)
         if messages is None:
@@ -686,8 +682,9 @@ def _open_agents(screen, client, cfg, status=None):
         while True:
             action = screen.prompt_attach_overlay(view,
                                                   title=chosen.get("name") or chosen["id"])
-            # a finished agent took its request records with it.
             if action == "requests":
+                title = chosen.get("name") or chosen["id"]
+                _open_requests(screen, requests, chosen["id"], f"Requests · {title}")
                 continue
             if action != "messages":
                 break

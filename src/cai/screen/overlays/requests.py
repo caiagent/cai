@@ -3,8 +3,8 @@
 A read-only cousin of the messages overlay, with the same feel: one folded row
 per request (when, status, what, how long, how big), Tab unfolds a digest of
 what was sent and what came back, Enter opens the whole exchange as JSON in
-the editor. It refreshes itself while open, so a request in flight - or a
-string of retries - shows up as it happens.
+the editor. It refreshes itself while open, so each request - or each try of
+a string of retries - shows up as soon as it ended.
 
 The caller owns the data: fetch_fn() returns the summaries (see
 cai.request_records.RequestRecord.summary), detail_fn(id) the full record of
@@ -36,9 +36,6 @@ from .frame import OverlayFrame
 # how often the open overlay asks the agent for news - a socket round trip.
 _POLL_INTERVAL = 0.5
 
-# the states of a request that will not change anymore (cai.request_records).
-_ENDED = ('done', 'failed', 'aborted')
-
 # how much of a digest's long parts the unfolded row shows; Enter has it all.
 _DIGEST_MESSAGES = 6
 _DIGEST_TEXT_LINES = 12
@@ -64,21 +61,17 @@ def _tokens(value):
 
 
 def status_label(summary):
-    """the short status column of a row: the HTTP status once there is one,
-    else what the request is doing."""
+    """the short status column of a row: the HTTP status when a response
+    came back, else why none did."""
     if summary.get('status') is not None:
         return str(summary['status'])
-    if summary.get('state') == 'failed':
-        return 'ERR'            # no response at all: a network error
     if summary.get('state') == 'aborted':
-        return 'CUT'
-    return '...'                # still waiting for the server
+        return 'CUT'            # interrupted before the server answered
+    return 'ERR'                # no response at all: a network error
 
 
 def status_color(summary):
     state = summary.get('state')
-    if state in ('pending', 'receiving'):
-        return SGR_YELLOW
     if state == 'aborted':
         return SGR_DIM_GRAY
     if state == 'failed':
@@ -94,11 +87,7 @@ def summary_line(summary):
         parts.append(str(summary['model']))
 
     state = summary.get('state')
-    if state == 'pending':
-        parts.append('waiting for the server')
-    elif state == 'receiving':
-        parts.append('receiving')
-    elif summary.get('duration') is not None:
+    if summary.get('duration') is not None:
         parts.append(_seconds(summary['duration']))
     if state == 'aborted':
         parts.append('interrupted')
@@ -253,8 +242,8 @@ class _View:
 
     def refresh(self):
         """pull the summaries again, keeping the cursor on the same request -
-        or on the newest one when it was already there - and re-read the
-        detail of every unfolded request that could still change."""
+        or on the newest one when it was already there. a request only shows
+        up once it ended, so the details already fetched stay as they are."""
         keep = self.selected_id()
         was_last = self.selected >= len(self.summaries) - 1
         self.summaries = self.fetch_fn() or []
@@ -273,13 +262,6 @@ class _View:
                 if summary['id'] != keep: continue
                 self.selected = i
                 break
-
-        for summary in self.summaries:
-            rid = summary['id']
-            if rid not in self.unfolded: continue
-            cached = self.details.get(rid)
-            if cached is not None and cached.get('state') in _ENDED: continue
-            self.load_detail(rid)
 
     def load_detail(self, rid):
         detail = self.detail_fn(rid)

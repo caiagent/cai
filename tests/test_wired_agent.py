@@ -21,7 +21,6 @@ from cai.skills import SkillsRegistry
 from cai.tools import ToolsRegistry
 from cai.wire import Wire
 from cai.wired_agent import UnixWiredAgent, WiredAgent, WireUI, _tool_names
-from cai.request_records import RequestRecords
 
 
 # --------------------------------------------------------------------------
@@ -120,7 +119,6 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     registered into the registry (the agent's source of truth); skill names are
     set directly without activating real skill files."""
     agent = Agent.__new__(Agent)
-    agent.request_records = RequestRecords()
     agent.name = "test"
     agent.model = "m"
     agent.api = api or FakeApi()

@@ -1,6 +1,7 @@
-"""Tests for the :requests feature: the records the api layer writes down
-(cai.request_records), their trip over the wire, and the overlay that shows
-them. Offline - requests.post is the scripted fake from test_api."""
+"""Tests for the :requests feature: the record the api layer fills in
+(cai.request_records), the hooks the loop announces it with, the TUI store
+that keeps them (cai.tui.requests), and the overlay that shows them. Offline -
+requests.post is the scripted fake from test_api."""
 import os
 import pty
 import threading
@@ -13,10 +14,13 @@ from test_api import FakeResponse, blocking_body, client, install, sse
 from test_wired_agent import make_agent
 
 from cai.api import ApiError
-from cai.request_records import RequestRecords, redact_headers
+from cai.environment import Settings
+from cai.hooks import HookEvent, HooksRegistry
+from cai.llm import call_llm
+from cai.request_records import RequestRecord, redact_headers
 from cai.screen.ansi import KEY_ESC, ansi_strip
 from cai.screen.overlays import requests as overlay
-from cai.wired_agent import WiredAgent
+from cai.tui.requests import RequestStore
 
 
 def test_authorization_is_redacted():
@@ -28,10 +32,10 @@ def test_blocking_request_is_recorded(monkeypatch):
     usage = {"prompt_tokens": 12, "completion_tokens": 3}
     install(monkeypatch, FakeResponse(body=blocking_body(content="ok", usage=usage),
                                       headers={"x-request-id": "abc"}))
-    records = RequestRecords()
-    client().chat([{"role": "user", "content": "hi"}], "m", records=records)
+    record = RequestRecord()
+    client().chat([{"role": "user", "content": "hi"}], "m", record=record)
 
-    [summary] = records.summaries()
+    summary = record.summary()
     assert summary["state"] == "done"
     assert summary["status"] == 200
     assert summary["method"] == "POST"
@@ -41,7 +45,7 @@ def test_blocking_request_is_recorded(monkeypatch):
     assert summary["prompt_tokens"] == 12
     assert summary["completion_tokens"] == 3
 
-    detail = records.detail(summary["id"])
+    detail = record.detail()
     assert detail["request"]["headers"]["Authorization"] == "Bearer ***"
     assert "sk-test" not in str(detail)
     assert detail["request"]["body"]["messages"] == [{"role": "user", "content": "hi"}]
@@ -57,10 +61,10 @@ def test_streamed_answer_is_recorded_assembled(monkeypatch):
              sse({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2}}),
              b"data: [DONE]"]
     install(monkeypatch, FakeResponse(lines=lines))
-    records = RequestRecords()
-    list(client().chat([], "m", stream=True, records=records))
+    record = RequestRecord()
+    list(client().chat([], "m", stream=True, record=record))
 
-    detail = records.detail(records.summaries()[0]["id"])
+    detail = record.detail()
     assert detail["state"] == "done"
     assert detail["response"]["content"] == "hello"
     assert detail["response"]["reasoning"] == "hm"
@@ -68,29 +72,30 @@ def test_streamed_answer_is_recorded_assembled(monkeypatch):
     assert detail["response"]["usage"]["completion_tokens"] == 2
 
 
-def test_every_attempt_gets_its_own_record(monkeypatch):
-    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
-              requests.ConnectionError("down"),
-              FakeResponse(body=blocking_body(content="ok"))]
-    install(monkeypatch, script=script)
-    monkeypatch.setattr("cai.api.time.sleep", lambda seconds: None)
-    records = RequestRecords()
-    client().chat([], "m", records=records)
+def test_failed_request_is_recorded(monkeypatch):
+    install(monkeypatch, FakeResponse(status_code=429, headers={"Retry-After": "7"}))
+    record = RequestRecord()
+    with pytest.raises(ApiError):
+        client().chat([], "m", retry=False, record=record)
+    summary = record.summary()
+    assert (summary["state"], summary["status"], summary["retry_after"]) == ("failed", 429, "7")
+    assert summary["error"] == "error-body"
 
-    limited, dropped, good = records.summaries()
-    assert (limited["state"], limited["status"], limited["retry_after"]) == ("failed", 429, "7")
-    assert limited["error"] == "error-body"
-    assert (dropped["state"], dropped["status"]) == ("failed", None)
-    assert "down" in dropped["error"]
-    assert (good["state"], good["status"]) == ("done", 200)
+    install(monkeypatch, exc=requests.ConnectionError("down"))
+    record = RequestRecord()
+    with pytest.raises(ApiError):
+        client().chat([], "m", retry=False, record=record)
+    summary = record.summary()
+    assert (summary["state"], summary["status"]) == ("failed", None)
+    assert "down" in summary["error"]
 
 
 def test_unusable_body_is_recorded_as_failed(monkeypatch):
     install(monkeypatch, FakeResponse(raise_json=True))
-    records = RequestRecords()
+    record = RequestRecord()
     with pytest.raises(ApiError):
-        client().chat([], "m", records=records)
-    [summary] = records.summaries()
+        client().chat([], "m", record=record)
+    summary = record.summary()
     assert summary["state"] == "failed"
     assert summary["status"] == 200
     assert "invalid JSON" in summary["error"]
@@ -101,12 +106,53 @@ def test_abandoned_stream_is_recorded_as_aborted(monkeypatch):
              sse({"choices": [{"delta": {"content": "b"}}]}),
              b"data: [DONE]"]
     install(monkeypatch, FakeResponse(lines=lines))
-    records = RequestRecords()
-    gen = client().chat([], "m", stream=True, records=records)
+    record = RequestRecord()
+    gen = client().chat([], "m", stream=True, record=record)
     next(gen)
     gen.close()
-    assert records.summaries()[0]["state"] == "aborted"
+    assert record.summary()["state"] == "aborted"
 
+
+# --------------------------------------------------------------------------
+# the hooks the loop announces each request with
+# --------------------------------------------------------------------------
+
+def test_loop_fires_after_request_for_every_attempt(monkeypatch):
+    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
+              FakeResponse(body=blocking_body(content="ok"))]
+    install(monkeypatch, script=script)
+    monkeypatch.setattr("cai.api.time.sleep", lambda seconds: None)
+    seen = []
+
+    def after(ctx):
+        seen.append(ctx.request)
+
+    hooks = HooksRegistry.from_list([(HookEvent.AFTER_REQUEST, after)])
+    list(call_llm([{"role": "user", "content": "hi"}], "m", client(),
+                  hooks=hooks, stream=False))
+
+    # one complete record per attempt.
+    limited, good = seen
+    assert limited is not good
+    assert (limited.state, limited.status) == ("failed", 429)
+    assert limited.body["messages"] == [{"role": "user", "content": "hi"}]
+    assert (good.state, good.content) == ("done", "ok")
+
+
+def test_after_request_fires_for_a_request_that_fails_for_good(monkeypatch):
+    install(monkeypatch, FakeResponse(status_code=400))
+    ended = []
+    hooks = HooksRegistry.from_list(
+        [(HookEvent.AFTER_REQUEST, lambda ctx: ended.append(ctx.request.status))])
+    with pytest.raises(ApiError):
+        list(call_llm([{"role": "user", "content": "hi"}], "m", client(),
+                      hooks=hooks, stream=False))
+    assert ended == [400]
+
+
+# --------------------------------------------------------------------------
+# the TUI's store
+# --------------------------------------------------------------------------
 
 def _streamed_ok():
     """a streaming response whose whole answer is 'ok' (an Agent run streams)."""
@@ -114,37 +160,59 @@ def _streamed_ok():
     return FakeResponse(lines=lines)
 
 
-def test_only_the_most_recent_requests_are_kept():
-    records = RequestRecords(limit=3)
-    for _ in range(5):
-        records.open("POST", "https://example.test/v1/x", {}, {})
-    assert [s["id"] for s in records.summaries()] == [3, 4, 5]
-    assert records.detail(1) is None
-    assert records.detail(5)["id"] == 5
+def _stored_agent(api, store, name):
+    """a bare test agent reporting its requests to `store`, the way the TUI
+    sets its agents up."""
+    agent = make_agent(api=api, hooks=[(HookEvent.AFTER_REQUEST, store.on_request)])
+    agent.name = name
+    return agent
 
 
-def test_agents_sharing_an_api_keep_separate_records(monkeypatch):
-    install(monkeypatch, _streamed_ok())
-    shared = client()
-    one = make_agent(api=shared)
-    two = make_agent(api=shared)
-    list(one.run("hi"))
-    assert len(one.get_requests()) == 1
-    assert two.get_requests() == []
-
-
-def test_requests_are_served_over_the_wire(monkeypatch):
+def test_an_agent_keeps_no_requests_itself(monkeypatch):
     install(monkeypatch, _streamed_ok())
     agent = make_agent(api=client())
     list(agent.run("hi"))
-    served = WiredAgent(agent)
+    assert not hasattr(agent, "request_records")
+    assert not hasattr(agent, "get_requests")
 
-    ok, summaries, _error = served._control("get_requests", None)
-    assert ok is True
-    assert len(summaries) == 1
-    ok, detail, _error = served._control("get_request", summaries[0]["id"])
-    assert detail["response"]["content"] == "ok"
-    assert served._control("get_request", 999) == (True, None, None)
+
+def test_store_files_each_request_under_its_agent(monkeypatch):
+    install(monkeypatch, _streamed_ok())
+    shared = client()
+    store = RequestStore(Settings())
+    one = _stored_agent(shared, store, "one")
+    two = _stored_agent(shared, store, "two")
+    list(one.run("hi"))
+    list(two.run("hi"))
+    list(one.run("again"))
+
+    assert [s["id"] for s in store.summaries("one")] == [1, 3]
+    assert [s["id"] for s in store.summaries("two")] == [2]
+    assert store.summaries("nobody") == []
+    assert store.detail("one", 3)["response"]["content"] == "ok"
+    assert store.detail("two", 3) is None       # another agent's request
+
+
+def test_store_keeps_only_the_most_recent(monkeypatch):
+    install(monkeypatch, _streamed_ok())
+    settings = Settings()
+    settings.keep_requests = 2
+    store = RequestStore(settings)
+    agent = _stored_agent(client(), store, "one")
+    for _ in range(4):
+        list(agent.run("hi"))
+    assert [s["id"] for s in store.summaries("one")] == [3, 4]
+    assert store.detail("one", 1) is None
+
+
+def test_store_keeps_nothing_when_the_setting_is_zero(monkeypatch):
+    install(monkeypatch, _streamed_ok())
+    settings = Settings()
+    settings.keep_requests = 0
+    store = RequestStore(settings)
+    agent = _stored_agent(client(), store, "one")
+    list(agent.run("hi"))
+    assert store.summaries("one") == []
 
 
 # --------------------------------------------------------------------------
@@ -184,17 +252,18 @@ def test_summary_line_shows_the_high_level_facts():
     assert overlay.status_label(_summary()) == "200"
 
 
-def test_summary_line_for_a_rate_limited_and_a_pending_request():
+def test_summary_line_for_requests_that_did_not_succeed():
     limited = _summary(state="failed", status=429, retry_after="7", error="slow down\nmore")
     line = overlay.summary_line(limited)
     assert "retry-after 7" in line
     assert "slow down" in line and "more" not in line
     assert overlay.status_label(limited) == "429"
 
-    pending = _summary(state="pending", status=None, duration=None)
-    assert "waiting for the server" in overlay.summary_line(pending)
-    assert overlay.status_label(pending) == "..."
     assert overlay.status_label(_summary(state="failed", status=None)) == "ERR"
+
+    cut = _summary(state="aborted", status=None)
+    assert overlay.status_label(cut) == "CUT"
+    assert "interrupted" in overlay.summary_line(cut)
 
 
 def test_detail_lines_digest_the_exchange():

@@ -1,26 +1,23 @@
-"""request_records: the HTTP requests an agent sent to the model server.
+"""request_records: one HTTP request to the model server, written down.
 
-Every chat request the api layer makes is written down as a RequestRecord -
-what went out (url, headers, body) and what came back (status, headers, the
-assembled answer, usage, or the error) - and kept in the agent's
-RequestRecords, a short in-memory list of the most recent ones. The TUI's
-:requests view reads them over the wire; nothing here is ever written to disk,
-and the list dies with the agent.
+A RequestRecord is what went out (url, headers, body) and what came back
+(status, headers, the assembled answer, usage, or the error) for a single
+chat request. The agentic loop makes one per request and hands it to the api
+layer, which fills it in as the request progresses; once the request ended -
+answered, failed or interrupted - the loop hands the record to the
+after_request hooks (ctx.request) and keeps nothing itself.
 
-It is a troubleshooting aid, so it is kept cheap: the list is bounded, a
-record holds a reference to the request body the api already built (never a
-copy), and a streamed answer is stored assembled, not as its raw SSE lines.
+So recording is entirely up to whoever registers a hook: the TUI keeps the
+recent ones in memory for its :requests view (cai.tui.requests), an extension
+could log them to a file, and an SDK or headless run with no such hook pays
+for one small object per request and nothing more.
 
-Each agent owns its own RequestRecords and hands it to the api per call, so
-agents that share one api client never see each other's requests."""
-import threading
+A record is cheap by design: it holds a reference to the request body the api
+already built (never a copy), and a streamed answer is stored assembled, not
+as its raw SSE lines."""
 import time
 
-from collections import deque
 from urllib.parse import urlsplit
-
-# how many requests an agent remembers; older ones fall off the front.
-LIMIT = 50
 
 # how much of a failed response's body a record keeps.
 _ERROR_BODY_MAX = 4000
@@ -48,12 +45,18 @@ def redact_headers(headers):
 
 
 class RequestRecord:
-    """one HTTP request and what came back. the api layer fills it in as the
-    request progresses: responded() when the status line arrives, then exactly
-    one of finished() / failed() / aborted()."""
+    """one HTTP request and what came back. it starts out empty; the api layer
+    fills it in as the request progresses: sent() when it goes out,
+    responded() when the status line arrives, then exactly one of finished() /
+    failed() / aborted()."""
 
-    def __init__(self, id, method, url, headers, body):
-        self.id = id
+    def __init__(self):
+        self.id = None                  # for whoever keeps records to assign
+        self.sent("", "", {}, {})
+
+    def sent(self, method, url, headers, body):
+        """the request is going out now. also starts the record over, for an
+        api call that sends the same request again (its own retries)."""
         self.method = method
         self.url = url
         self.request_headers = redact_headers(headers)
@@ -159,40 +162,3 @@ class RequestRecord:
         out["request"] = request
         out["response"] = response
         return out
-
-
-class RequestRecords:
-    """the most recent requests of one agent, oldest first. the api's request
-    thread adds and fills records while the wire's control thread reads them,
-    so the list itself is guarded by a lock."""
-
-    def __init__(self, limit=LIMIT):
-        self._records = deque(maxlen=limit)
-        self._lock = threading.Lock()
-        self._next_id = 1
-
-    def open(self, method, url, headers, body):
-        """start the record of a request that is about to be sent."""
-        with self._lock:
-            record = RequestRecord(self._next_id, method, url, headers, body)
-            self._next_id += 1
-            self._records.append(record)
-        return record
-
-    def summaries(self):
-        """summary() of every remembered request, oldest first."""
-        with self._lock:
-            records = list(self._records)
-        summaries = []
-        for record in records:
-            summaries.append(record.summary())
-        return summaries
-
-    def detail(self, id):
-        """detail() of the request with this id, or None once it fell off."""
-        with self._lock:
-            records = list(self._records)
-        for record in records:
-            if record.id != id: continue
-            return record.detail()
-        return None

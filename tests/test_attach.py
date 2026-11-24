@@ -123,7 +123,8 @@ def test_attach_agent_mirrors_snapshot_then_live_stream(tmp_path, monkeypatch):
         node["id"] = agent.name
         node["name"] = agent.name
         screen = _OverlayScreen(driver_wire, "> two")
-        assert _attach_agent(screen, node, Settings(), stops.append, lambda model: 1000) is True
+        assert _attach_agent(screen, node, Settings(), stops.append, None,
+                             lambda model: 1000) is True
         assert screen.ctx_before == "ctx 10% (100/1000)"
         assert screen.ctx_after == "ctx 25% (250/1000)"
 
@@ -149,7 +150,7 @@ def test_attach_agent_falls_back_when_the_socket_is_gone(tmp_path, monkeypatch):
     node = {}
     node["id"] = "ghost"
     node["name"] = "ghost"
-    assert _attach_agent(None, node, Settings(), None) is False
+    assert _attach_agent(None, node, Settings(), None, None) is False
 
 
 # --------------------------------------------------------------------------

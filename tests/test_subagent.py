@@ -20,7 +20,6 @@ from cai.subagent import _wait_agent
 from cai.subagent import _kill_agent
 from cai.subagent import make_launch_agent
 from cai.tools import schema_from_function
-from cai.request_records import RequestRecords
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +90,6 @@ def make_parent(api, tools=None, skills=None):
     """a parent Agent without config/network (bypass __init__), carrying just the
     state the sub-agent tools read: model, api, registries, hooks, children."""
     parent = Agent.__new__(Agent)
-    parent.request_records = RequestRecords()
     parent.name = "parent"
     parent.model = "m"
     parent.api = api

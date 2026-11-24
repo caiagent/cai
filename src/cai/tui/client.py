@@ -111,14 +111,6 @@ class AgentClient:
     def set_messages(self, messages):
         self._call("set_messages", messages)
 
-    def get_requests(self):
-        """a summary of each recent HTTP request the agent sent, oldest first."""
-        return self._call("get_requests") or []
-
-    def get_request(self, id):
-        """the full record of one request, or None once the agent forgot it."""
-        return self._call("get_request", id)
-
     def get_selected_tools(self):
         return self._call("get_selected_tools") or []
 
@@ -469,7 +461,7 @@ class _Worker(threading.Thread):
         self._status.set_sample(self._sample_tokens, self._sample_chars)
 
 
-def _agent_control(name, op, value=None):
+def _agent_control(name, op):
     """connect to an agent's socket and run one read-only control op; returns its
     value, or None if the socket is gone/unreachable. the :agents view reads
     everything this way - solely over ~/.config/cai/agents/*.sock."""
@@ -481,11 +473,11 @@ def _agent_control(name, op, value=None):
         return None
     wire = Wire(channel)
     try:
-        ok, result, _error = wire.control(op, value)
+        ok, value, _error = wire.control(op)
     except OSError:
-        ok, result = False, None
+        ok, value = False, None
     finally:
         channel.close()
     if not ok:
         return None
-    return result
+    return value

@@ -198,11 +198,11 @@ def test_hook_order_over_a_tool_turn_and_an_answer():
         hooks.register(event, record)
 
     run_loop([[("poke", "{}"), ("prod", "{}")], "final"], hooks)
-    assert order == ["before_turn",
+    assert order == ["before_turn", "after_request",
                      "before_tool_call", "messages_mutated", "after_tool_call",
                      "before_tool_call", "messages_mutated", "after_tool_call",
                      "after_turn",
-                     "before_turn",
+                     "before_turn", "after_request",
                      "on_final_response", "after_run"]
 
 
@@ -216,7 +216,8 @@ def test_hook_order_over_a_plain_answer():
         hooks.register(event, record)
 
     run_loop(["final"], hooks)
-    assert order == ["before_turn", "on_final_response", "after_run"]
+    assert order == ["before_turn", "after_request",
+                     "on_final_response", "after_run"]
 
 
 def test_event_stream_shape():
@@ -533,8 +534,10 @@ def test_hook_contexts_carry_the_model_of_the_moment():
     api = ScriptedApi([[("poke", "{}")], "final"])
     messages = [{"role": "user", "content": "go"}]
     drain(call_llm(messages, current, api, tools=TOOLS, tools_dispatch=make_dispatch([]), hooks=hooks))
-    assert seen == [("before_turn", "m1"), ("before_tool_call", "m1"), ("messages_mutated", "m1"),
+    assert seen == [("before_turn", "m1"), ("after_request", "m1"),
+                    ("before_tool_call", "m1"), ("messages_mutated", "m1"),
                     ("after_tool_call", "m1"), ("after_turn", "m2"), ("before_turn", "m2"),
+                    ("after_request", "m2"),
                     ("on_final_response", "m2"), ("after_run", "m2")]
     assert api.calls[0]["model"] == "m1"
     assert api.calls[1]["model"] == "m2"

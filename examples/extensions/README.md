@@ -25,6 +25,11 @@ by mutating: the conversation through `ctx.messages`, the agent through
 `after_tool_call`, `messages_mutated`, `messages_loaded` and `after_run` are
 observers too; `compact`'s README shows `after_run` as a second trigger.
 
+`after_request` observes each HTTP request to the model server once it
+ended: `ctx.request` is its record (url, redacted headers, body, status,
+response headers, timings, answer or error). The TUI's `:requests` view is
+built on it; another hook could log the requests to a file.
+
 ## By agent mutation
 
 | call | example |

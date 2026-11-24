@@ -99,6 +99,9 @@ class Settings:
     builds Agent/Run directly and never passes through that merge."""
     show_reasoning: bool = True
     tool_result_max_chars: int = 40_000
+    # how many recent HTTP requests the TUI remembers for the :requests view
+    # (in memory only, across all its agents and sub-agents); 0 keeps none.
+    keep_requests: int = 200
     auto_save_sessions: bool = True
     max_sessions_mb: int = 500
     skills: list = field(default_factory=list)

@@ -355,16 +355,18 @@ class _Tabs:
 
 
 class _Shared:
-    """what every tab is built from: the env, the models registry and the
-    command palette."""
+    """what every tab is built from: the env, the models registry, the
+    command palette, and the store the :requests view reads."""
 
-    def __init__(self, env, registry, fallback_limit, palette, arg_commands, completions):
+    def __init__(self, env, registry, fallback_limit, palette, arg_commands, completions,
+                 requests):
         self.env = env
         self.registry = registry
         self.fallback_limit = fallback_limit
         self.palette = palette
         self.arg_commands = arg_commands
         self.completions = completions
+        self.requests = requests
 
 
 def _open_clone_tab(tabs):

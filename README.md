@@ -140,7 +140,8 @@ carries its own reference.
 interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
 session: `:models`, `:messages`, `:requests` (the HTTP requests sent to the
 model server - status, timing, headers, body - kept in memory only, for
-troubleshooting), `:history`, `:sessions`, `:save`, `:load`,
+troubleshooting; `cai.settings.keep_requests` sets how many, default 200, 0
+for none), `:history`, `:sessions`, `:save`, `:load`,
 `:tools`, `:skills`, `:pwd` (print the agent's working directory),
 `:status` (Tab: a framed status window in the middle of the
 conversation - model, working directory, active skills and tools, live

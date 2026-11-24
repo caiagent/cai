@@ -15,7 +15,6 @@ from cai.events import EventType
 from cai.llm import SteerQueue
 from cai.skills import SkillsRegistry
 from cai.tools import ToolsRegistry
-from cai.request_records import RequestRecords
 
 
 # --------------------------------------------------------------------------
@@ -54,7 +53,6 @@ class CallsThenTextApi:
 
 def bare_agent(tools_registry, api):
     agent = Agent.__new__(Agent)
-    agent.request_records = RequestRecords()
     agent.name = "test"
     agent.model = "m"
     agent.api = api

@@ -34,6 +34,7 @@ from cai.hooks import HookContext, HookEvent, HooksRegistry, RunGate, ToolCall
 from cai.hooks import current_model, current_system_prompt, current_tools
 from cai.hooks import reset_gate, set_gate, veto_message
 from cai.origin import ORIGIN_KEY
+from cai.request_records import RequestRecord
 from cai.ui import NULL_UI, reset_ui, set_ui
 
 
@@ -242,14 +243,18 @@ def _turn(api,
           temperature,
           stream,
           interrupt,
-          records):
+          messages,
+          hooks,
+          config,
+          ui,
+          hooks_data):
     """Ask the model once, and keep asking while the failure is temporary.
 
     yields the content/reasoning events as they arrive and returns
     (content, reasoning, tool_calls, usage).
 
     in plain steps:
-      1. send the request (_attempt).
+      1. send the request (_attempt), then tell the hooks how it went.
       2. it worked -> return the answer.
       3. it failed for good (bad key, bad request, out of attempts) -> the
          ApiError goes up to the caller. a failure never reads as an empty
@@ -260,7 +265,13 @@ def _turn(api,
 
     the api decides what "for now" means and how long to wait (retry_wait);
     this function only does the waiting, because only the loop can yield
-    events. an interrupt during the wait ends the turn with an empty answer."""
+    events. an interrupt during the wait ends the turn with an empty answer.
+
+    every request gets a RequestRecord of its own, which the api fills in.
+    the loop keeps none of them: once a request ended - answered, failed or
+    interrupted - after_request hands its record to whoever registered a hook
+    (the TUI's :requests view does). `messages`, `hooks`, `config`, `ui` and
+    `hooks_data` are only here to build that hook's context."""
     # imported here, not at module level: cai.api pulls in requests, which
     # this module otherwise never needs.
     from cai.api import ApiError
@@ -271,6 +282,8 @@ def _turn(api,
 
         # steps 1-2: one request. a temporary failure can only happen before
         # the model sent anything, so no event of a failed attempt was yielded.
+        record = RequestRecord()
+        error = None
         try:
             answer = yield from _attempt(api,
                                          call_messages,
@@ -281,10 +294,13 @@ def _turn(api,
                                          temperature,
                                          stream,
                                          interrupt,
-                                         records)
-            return answer
+                                         record)
         except ApiError as e:
             error = e
+        finally:
+            _fire_after_request(record, messages, model, hooks, config, ui, hooks_data)
+        if error is None:
+            return answer
 
         # step 3: give up when the api says this failure is final.
         wait = api.retry_wait(error, attempt)
@@ -300,6 +316,19 @@ def _turn(api,
         interrupted = _sleep(delay, interrupt)
         if interrupted:
             return "", "", None, {}
+
+
+def _fire_after_request(record, messages, model, hooks, config, ui, hooks_data):
+    """fire after_request for one HTTP request to the model server that just
+    ended. the hook finds the request's record in ctx.request."""
+    ctx = HookContext(event=HookEvent.AFTER_REQUEST,
+                      messages=messages,
+                      model=current_model(model),
+                      config=config,
+                      ui=ui,
+                      request=record,
+                      data=_merge_data(hooks_data))
+    hooks.fire(HookEvent.AFTER_REQUEST, ctx)
 
 
 def _sleep(seconds, interrupt):
@@ -320,7 +349,7 @@ def _attempt(api,
              temperature,
              stream,
              interrupt,
-             records):
+             record):
     """Send the request to the model exactly once - no retrying here, that is
     _turn's job (retry=False tells the api the same).
 
@@ -335,8 +364,8 @@ def _attempt(api,
     # handed down so a kill bites while the api is blocked on the network.
     request['interrupt'] = interrupt
     request['retry'] = False
-    # where the api writes down the HTTP request it makes (the :requests view).
-    request['records'] = records
+    # the api writes down what it sent and what came back in here.
+    request['record'] = record
 
     if stream:
         answer = yield from _streamed_answer(api, call_messages, model, request, interrupt)
@@ -576,8 +605,7 @@ def call_llm(messages,
              temperature=None,
              stream=True,
              config=None,
-             hooks_data=None,
-             records=None):
+             hooks_data=None):
     """The agentic loop. See the module docstring for the consumer contract.
 
     messages   - the live conversation; mutated in place as the loop runs.
@@ -606,9 +634,6 @@ def call_llm(messages,
                  answer with steers pending is not final: they fold in and the
                  loop re-enters, so a steer lands at the closest boundary
                  instead of waiting for the next run. None = no steering.
-    records    - a cai.request_records.RequestRecords the api writes every
-                 HTTP request of this run into (the :requests view reads it).
-                 None = nobody is collecting.
     Returns the final assistant text (as the generator's return value).
 
     a model call that fails for good raises cai.api.ApiError (the transient
@@ -665,7 +690,11 @@ def call_llm(messages,
                                                                  temperature,
                                                                  stream,
                                                                  interrupt,
-                                                                 records)
+                                                                 messages,
+                                                                 hooks,
+                                                                 config,
+                                                                 ui,
+                                                                 hooks_data)
 
         if usage:
             yield Event(type=EventType.USAGE, usage=dict(usage))

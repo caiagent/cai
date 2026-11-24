@@ -16,6 +16,7 @@ from cai.tui.commands import (
     _dispatch,
     _palette_entries,
 )
+from cai.tui.requests import RequestStore
 from cai.tui.tabs import _TAB_COMMANDS, _Shared, _Tab, _Tabs
 
 
@@ -84,12 +85,20 @@ def run(*,
     autosave_hooks.append((HookEvent.AFTER_RUN, _autosave))
     autosave_hooks.append((HookEvent.MESSAGES_MUTATED, _autosave))
 
+    # the :requests view: the loop keeps no record of its HTTP requests, it
+    # only announces them - this hook is what remembers the recent ones. a
+    # cloned tab's agent and every sub-agent inherit the hook, so one store
+    # holds them all.
+    requests = RequestStore(env.settings)
+    request_hooks = []
+    request_hooks.append((HookEvent.AFTER_REQUEST, requests.on_request))
+
     agent = Agent(model=model,
                   env=env,
                   system_prompt=system_prompt,
                   tools=tools or [],
                   skills=skills or [],
-                  hooks=autosave_hooks,
+                  hooks=autosave_hooks + request_hooks,
                   reasoning_effort=reasoning_effort,
                   temperature=temperature,
                   max_steps=max_steps,
@@ -111,7 +120,8 @@ def run(*,
     completions = {}
     for name, _help in palette:
         completions[name] = []
-    shared = _Shared(env, registry, fallback_limit, palette, tuple(arg_commands), completions)
+    shared = _Shared(env, registry, fallback_limit, palette, tuple(arg_commands), completions,
+                     requests)
     index = _command_index(_COMMANDS)
 
     tabs = _Tabs()

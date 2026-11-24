@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Mapping, Optional
 
 from cai.environment import Environment
+from cai.request_records import RequestRecord
 from cai.ui import UI, NULL_UI, reset_ui, set_ui
 
 
@@ -39,6 +40,7 @@ class HookEvent(str, Enum):
     hook can register with the plain string ('before_tool_call') while core
     code uses the member (HookEvent.BEFORE_TOOL_CALL) - they compare equal."""
     BEFORE_TURN = "before_turn"
+    AFTER_REQUEST = "after_request"
     BEFORE_TOOL_CALL = "before_tool_call"
     AFTER_TOOL_CALL = "after_tool_call"
     MESSAGES_MUTATED = "messages_mutated"
@@ -140,6 +142,9 @@ class HookContext:
     usage: Optional[dict] = None
     tool_call: Optional[ToolCall] = None
     content: Optional[str] = None
+    # after_request: the HTTP request to the model server that just ended, as
+    # a cai.request_records.RequestRecord - what was sent and what came back.
+    request: Optional[RequestRecord] = None
     data: Optional[dict] = None   # one unified bag: the caller's hooks_data
                                   # (identical across every context of a run)
                                   # with this event's own keys layered on top.
