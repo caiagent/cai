@@ -241,7 +241,8 @@ def _turn(api,
           reasoning_effort,
           temperature,
           stream,
-          interrupt):
+          interrupt,
+          records):
     """Ask the model once, and keep asking while the failure is temporary.
 
     yields the content/reasoning events as they arrive and returns
@@ -279,7 +280,8 @@ def _turn(api,
                                          reasoning_effort,
                                          temperature,
                                          stream,
-                                         interrupt)
+                                         interrupt,
+                                         records)
             return answer
         except ApiError as e:
             error = e
@@ -317,7 +319,8 @@ def _attempt(api,
              reasoning_effort,
              temperature,
              stream,
-             interrupt):
+             interrupt,
+             records):
     """Send the request to the model exactly once - no retrying here, that is
     _turn's job (retry=False tells the api the same).
 
@@ -332,6 +335,8 @@ def _attempt(api,
     # handed down so a kill bites while the api is blocked on the network.
     request['interrupt'] = interrupt
     request['retry'] = False
+    # where the api writes down the HTTP request it makes (the :requests view).
+    request['records'] = records
 
     if stream:
         answer = yield from _streamed_answer(api, call_messages, model, request, interrupt)
@@ -571,7 +576,8 @@ def call_llm(messages,
              temperature=None,
              stream=True,
              config=None,
-             hooks_data=None):
+             hooks_data=None,
+             records=None):
     """The agentic loop. See the module docstring for the consumer contract.
 
     messages   - the live conversation; mutated in place as the loop runs.
@@ -600,6 +606,9 @@ def call_llm(messages,
                  answer with steers pending is not final: they fold in and the
                  loop re-enters, so a steer lands at the closest boundary
                  instead of waiting for the next run. None = no steering.
+    records    - a cai.request_records.RequestRecords the api writes every
+                 HTTP request of this run into (the :requests view reads it).
+                 None = nobody is collecting.
     Returns the final assistant text (as the generator's return value).
 
     a model call that fails for good raises cai.api.ApiError (the transient
@@ -655,7 +664,8 @@ def call_llm(messages,
                                                                  reasoning_effort,
                                                                  temperature,
                                                                  stream,
-                                                                 interrupt)
+                                                                 interrupt,
+                                                                 records)
 
         if usage:
             yield Event(type=EventType.USAGE, usage=dict(usage))

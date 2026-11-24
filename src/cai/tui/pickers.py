@@ -45,6 +45,28 @@ def _open_messages(screen, client, status):
         client.set_messages(edited)
 
 
+def _open_requests(screen, client):
+    """open the :requests overlay: the HTTP requests this session's agent sent
+    to the model server, read live over the wire. nothing is stored - the
+    agent only remembers its most recent ones, in memory."""
+    if not client.get_requests():
+        screen.write("[no requests yet]\n", kind=Screen.META, block=True)
+        return
+    screen.prompt_requests_overlay(client.get_requests, client.get_request)
+
+
+def _open_agent_requests(screen, name, title):
+    """the :requests overlay for another agent (a sub-agent being watched),
+    read over that agent's own socket."""
+    def _fetch():
+        return _agent_control(name, "get_requests") or []
+
+    def _detail(id):
+        return _agent_control(name, "get_request", id)
+
+    screen.prompt_requests_overlay(_fetch, _detail, title=f"Requests · {title}")
+
+
 def _history_node_label(node):
     if node["role"] == "user":
         return "user"
@@ -504,6 +526,9 @@ def _attach_agent(screen, node, cfg, stop_fn, limit_fn=None):
             except OSError:
                 pass
         attached = True
+        if action == "requests":
+            _open_agent_requests(screen, name, title)
+            continue
         if action != "messages":
             return True
         messages = _agent_control(name, "get_messages")
@@ -661,6 +686,9 @@ def _open_agents(screen, client, cfg, status=None):
         while True:
             action = screen.prompt_attach_overlay(view,
                                                   title=chosen.get("name") or chosen["id"])
+            # a finished agent took its request records with it.
+            if action == "requests":
+                continue
             if action != "messages":
                 break
             screen.prompt_messages_overlay(messages)

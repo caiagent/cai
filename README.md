@@ -138,7 +138,9 @@ carries its own reference.
 
 `cai` with no prompt (and a terminal attached) opens the full-screen
 interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
-session: `:models`, `:messages`, `:history`, `:sessions`, `:save`, `:load`,
+session: `:models`, `:messages`, `:requests` (the HTTP requests sent to the
+model server - status, timing, headers, body - kept in memory only, for
+troubleshooting), `:history`, `:sessions`, `:save`, `:load`,
 `:tools`, `:skills`, `:pwd` (print the agent's working directory),
 `:status` (Tab: a framed status window in the middle of the
 conversation - model, working directory, active skills and tools, live

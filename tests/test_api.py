@@ -12,6 +12,7 @@ import requests
 
 import cai.api as api
 from cai.api import ApiError, OpenAiApi, SystemOneApi, _wire_messages
+from cai.request_records import RequestRecords
 
 
 # --------------------------------------------------------------------------
@@ -795,6 +796,9 @@ class RaisingApi:
     def chat(self, messages, model, **kwargs):
         raise ApiError("provider down", status=502)
 
+    def retry_wait(self, error, attempt):
+        return None       # final: the loop must not try again
+
 
 def test_call_llm_propagates_api_error():
     from cai.llm import call_llm
@@ -902,7 +906,8 @@ def test_interrupt_during_retry_backoff_stops_retrying(monkeypatch):
     interrupt.set()
     url = "https://example.test/v1/chat/completions"
     with pytest.raises(ApiError):
-        client()._post_with_retry(url, {}, {}, stream=False, interrupt=interrupt)
+        client()._post_with_retry(url, {}, {}, False, RequestRecords(),
+                                  interrupt=interrupt)
     assert len(rec.calls) == 1            # gave up instead of retrying
 
 

@@ -39,6 +39,7 @@ from cai import usage
 from cai.api import OpenAiApi
 from cai.environment import Environment
 from cai.events import Event, EventType
+from cai.request_records import RequestRecords
 from cai.llm import call_llm, SteerQueue
 from cai.strict import enforce_strict_format
 from cai.tools import ToolsRegistry
@@ -213,6 +214,10 @@ class Agent:
         self._system_prompt = system_prompt   # base; combined with skills on demand
         self._hooks = hooks   # [(event, fn), ...] or None; turned into a HooksRegistry per run
         self._ui = ui         # UI hooks prompt through; None -> NULL_UI in call_llm
+        # the HTTP requests this agent sent to the model server, most recent
+        # last - in memory only, for the :requests view. its own list even when
+        # the api client is shared with a parent or sibling agent.
+        self.request_records = RequestRecords()
         self.reasoning_effort = reasoning_effort
         self.temperature = temperature
         self.max_steps = max_steps
@@ -415,6 +420,16 @@ class Agent:
     def get_messages(self):
         """the agent's live conversation list."""
         return self.messages
+
+    def get_requests(self):
+        """a summary of each recent HTTP request this agent sent to the model
+        server, oldest first (see cai.request_records)."""
+        return self.request_records.summaries()
+
+    def get_request(self, id):
+        """everything about one of those requests - what was sent and what
+        came back - or None once it is no longer remembered."""
+        return self.request_records.detail(id)
 
     def _fire_messages_event(self, event):
         """fire `event` for a conversation change made outside a run, so hooks that
@@ -723,7 +738,8 @@ class Agent:
                                     temperature=0,
                                     max_steps=self.max_steps,
                                     stream=False,
-                                    hooks_data={"agent": self})
+                                    hooks_data={"agent": self},
+                                    records=self.request_records)
                 strict_stream = enforce_strict_format(make_stream,
                                                       strict_format,
                                                       system_prompt,
@@ -745,7 +761,8 @@ class Agent:
                                   temperature=self.temperature,
                                   max_steps=self.max_steps,
                                   stream=stream,
-                                  hooks_data={"agent": self})
+                                  hooks_data={"agent": self},
+                                  records=self.request_records)
             text = yield from self._noting_usage(run_stream)
             return text
         finally:

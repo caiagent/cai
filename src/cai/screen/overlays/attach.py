@@ -12,7 +12,8 @@ agent cannot be driven from this view - read-only by construction.
 
 Keys: j/k scroll (wheel too), gg/G jump (G re-follows the tail), Ctrl-U/D
 half-page, PgUp/PgDn page, Ctrl-K kills the watched agent, Ctrl-L hands off to the messages
-overlay (returns 'messages'; the caller opens it and may re-enter), ESC/q
+overlay (returns 'messages'; the caller opens it and may re-enter), Ctrl-R
+likewise to the requests overlay of a live agent (returns 'requests'), ESC/q
 detaches (it runs on)."""
 
 import select
@@ -25,7 +26,7 @@ from ..ansi import (
     ERASE_SCREEN,
     SGR_AZURE_ON_DGRAY, SGR_RESET,
     SYNC_START, SYNC_END,
-    KEY_ESC, KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_U,
+    KEY_ESC, KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_R, KEY_CTRL_U,
     KEY_UP, KEY_DOWN, KEY_PGUP, KEY_PGDN,
 )
 from ..input import read_key, parse_mouse
@@ -43,7 +44,8 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
     for an agent that already finished: pure scrollback); kill_fn()
     interrupts the watched agent on Ctrl-K; ctx_fn() is the watched agent's
     context readout ('ctx 12% (...)') for the status row. returns None on
-    ESC/q, or 'messages' on Ctrl-L - the caller opens the messages overlay
+    ESC/q, 'requests' on Ctrl-R (a live agent only), or 'messages' on Ctrl-L -
+    the caller opens the messages overlay
     (the two overlays each own the terminal, so they cannot nest) and may
     re-enter."""
     alive = watch is not None and drain_fn is not None
@@ -62,7 +64,7 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
         hints = 'j/k:scroll G:tail ^L:messages ESC:back '
         if alive:
             state = 'running'
-            hints = 'j/k:scroll G:tail ^K:kill ^L:messages ESC:back '
+            hints = 'j/k:scroll G:tail ^K:kill ^L:messages ^R:requests ESC:back '
         left = f' {title} · read-only · {state}'
         ctx = _ctx()
         if ctx:
@@ -148,6 +150,8 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
                 return None
             if key == KEY_CTRL_L:
                 return 'messages'
+            if key == KEY_CTRL_R and alive:
+                return 'requests'
             if key == KEY_CTRL_K:
                 if alive and kill_fn is not None:
                     kill_fn()

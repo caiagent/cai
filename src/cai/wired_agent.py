@@ -542,6 +542,10 @@ class WiredAgent:
         if op == "set_messages":
             agent.set_messages(value)
             return True, None, None
+        if op == "get_requests":
+            return True, agent.get_requests(), None
+        if op == "get_request":
+            return True, agent.get_request(value), None
         if op == "get_selected_skills":
             return True, agent.get_selected_skills(), None
         if op == "get_skill_tools":

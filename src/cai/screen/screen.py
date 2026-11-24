@@ -1243,6 +1243,17 @@ class Screen:
         finally:
             self.pop_focus()
 
+    def prompt_requests_overlay(self, fetch_fn, detail_fn, *, title='Requests'):
+        """the HTTP requests an agent sent to the model server. see
+        overlays/requests.py for docs."""
+        from .overlays.requests import prompt_requests_overlay
+
+        self.push_focus('requests')
+        try:
+            return prompt_requests_overlay(self, fetch_fn, detail_fn, title=title)
+        finally:
+            self.pop_focus()
+
     def prompt_messages_overlay(self, messages, *,
                                 context_size=0, prompt_tokens=0, sample_chars=0,
                                 refetch=None, revision=None, readonly=False):
