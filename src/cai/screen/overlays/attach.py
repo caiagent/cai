@@ -11,7 +11,7 @@ the agent tore down). Nothing here ever writes to the socket, so the watched
 agent cannot be driven from this view - read-only by construction.
 
 Keys: j/k scroll (wheel too), gg/G jump (G re-follows the tail), Ctrl-U/D
-half-page, Ctrl-K kills the watched agent, Ctrl-L hands off to the messages
+half-page, PgUp/PgDn page, Ctrl-K kills the watched agent, Ctrl-L hands off to the messages
 overlay (returns 'messages'; the caller opens it and may re-enter), ESC/q
 detaches (it runs on)."""
 
@@ -26,7 +26,7 @@ from ..ansi import (
     SGR_AZURE_ON_DGRAY, SGR_RESET,
     SYNC_START, SYNC_END,
     KEY_ESC, KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_U,
-    KEY_UP, KEY_DOWN,
+    KEY_UP, KEY_DOWN, KEY_PGUP, KEY_PGDN,
 )
 from ..input import read_key, parse_mouse
 from .frame import OverlayFrame
@@ -161,7 +161,10 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
                 follow = False
                 offset = max(0, offset - 1)
             elif key == 'G':
+                # move the offset too: the repaint is keyed on it, so follow
+                # alone would only show once the agent streamed something new.
                 follow = True
+                offset = max_offset
             elif key == 'g' and prev_key == 'g':
                 follow = False
                 offset = 0
@@ -170,6 +173,12 @@ def prompt_attach_overlay(screen, view, *, title, watch=None, drain_fn=None,
                 offset = max(0, offset - max(1, content_rows // 2))
             elif key == KEY_CTRL_D:
                 offset = min(max_offset, offset + max(1, content_rows // 2))
+                follow = offset >= max_offset
+            elif key == KEY_PGUP:
+                follow = False
+                offset = max(0, offset - max(1, content_rows - 1))
+            elif key == KEY_PGDN:
+                offset = min(max_offset, offset + max(1, content_rows - 1))
                 follow = offset >= max_offset
             prev_key = key
 

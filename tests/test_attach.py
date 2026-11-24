@@ -188,3 +188,70 @@ def test_screen_wrapper_accepts_every_overlay_parameter():
     wrapper = set(inspect.signature(Screen.prompt_attach_overlay).parameters) - {"self"}
     overlay = set(inspect.signature(prompt_attach_overlay).parameters) - {"screen"}
     assert wrapper == overlay
+
+
+class _TtyScreen:
+    """the slice of a Screen the attach overlay itself reads: the tty it
+    select()s for keys and the size it paints at."""
+
+    def __init__(self, tty_fd, rows, cols):
+        self._tty_fd = tty_fd
+        self._rows = rows
+        self._cols = cols
+
+
+def _top_rows_after(keys, capsys):
+    """open the attach overlay over a 100-line view on a 11-row screen (10
+    content rows), feed it `keys` one at a time, and return the first content
+    line on screen after each key."""
+    import os
+    import pty
+    import re
+    import time
+
+    from cai.screen.ansi import KEY_ESC
+    from cai.screen.overlays.attach import prompt_attach_overlay
+
+    view = _AttachView(80)
+    for i in range(100):
+        view.write(f"line{i:03d}\n")
+    master, slave = pty.openpty()
+    tops = []
+
+    def press():
+        time.sleep(0.3)
+        capsys.readouterr()
+        for key in keys:
+            os.write(master, key.encode())
+            time.sleep(0.3)
+            painted = re.findall(r"\x1b\[1;1H\x1b\[2K(?:\x1b\[[0-9;]*m)*\s*(line\d+)",
+                                 capsys.readouterr().out)
+            top = None
+            if painted:
+                top = painted[-1]
+            tops.append(top)
+        os.write(master, KEY_ESC.encode())
+
+    presser = threading.Thread(target=press, daemon=True)
+    presser.start()
+    try:
+        prompt_attach_overlay(_TtyScreen(slave, 11, 80), view, title="sub")
+    finally:
+        presser.join(timeout=5)
+        os.close(master)
+        os.close(slave)
+    return tops
+
+
+def test_attach_overlay_G_jumps_back_to_the_tail(capsys):
+    # gg to the head, then G: the tail must repaint without new content.
+    tops = _top_rows_after(["g", "g", "G"], capsys)
+    assert tops[1] == "line000"
+    assert tops[2] == "line090"
+
+
+def test_attach_overlay_pages_with_pgup_and_pgdn(capsys):
+    from cai.screen.ansi import KEY_PGDN, KEY_PGUP
+
+    tops = _top_rows_after([KEY_PGUP, KEY_PGUP, KEY_PGDN], capsys)
+    assert tops == ["line081", "line072", "line081"]
