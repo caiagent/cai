@@ -7,6 +7,9 @@ import warnings
 import threading
 import requests
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+
 from cai.origin import envelope, origin_of
 from urllib.parse import urlsplit, urlunsplit
 from urllib3.exceptions import InsecureRequestWarning
@@ -16,6 +19,14 @@ log = logging.getLogger("cai")
 # base delay before the second attempt; each further attempt doubles it.
 # module-level so a test can zero it out.
 _RETRY_BACKOFF = 0.5
+
+# the same, for a rate-limited (429) request: a limit resets over seconds to a
+# minute, so the short transient backoff would only burn the attempts.
+_RATE_LIMIT_BACKOFF = 5.0
+
+# the longest a server's Retry-After is obeyed for; a longer ask is clamped so
+# one header cannot park a run for an hour.
+_RETRY_AFTER_MAX = 60.0
 
 # how often an interruptible request re-checks its interrupt Event while the
 # pump thread is blocked on the network.
@@ -45,6 +56,39 @@ def _retryable(status):
     if status == 429:
         return True
     return status >= 500
+
+
+def _parse_retry_after(value):
+    """seconds to wait per a Retry-After header value - either delta-seconds
+    or an HTTP-date - or None when absent/unparseable."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    if seconds != seconds:              # nan
+        return None
+    return max(0.0, seconds)
+
+
+def _retry_delay(status, attempt, headers=None):
+    """seconds to wait after failed attempt number `attempt` (1-based). a
+    server-sent Retry-After wins (clamped to _RETRY_AFTER_MAX); otherwise a
+    doubling backoff, from a longer base when the failure was a 429."""
+    if headers is not None:
+        asked = _parse_retry_after(headers.get('Retry-After'))
+        if asked is not None:
+            return min(asked, _RETRY_AFTER_MAX)
+    base = _RATE_LIMIT_BACKOFF if status == 429 else _RETRY_BACKOFF
+    return base * (2 ** (attempt - 1))
 
 
 def _price_per_mtok(value):
@@ -132,7 +176,8 @@ class OpenAiApi:
                  api_key,
                  ssl_verify=True,
                  timeout=(10, 120),
-                 retries=3):
+                 retries=3,
+                 rate_limit_retries=5):
         self.base_url = base_url
         self.api_key = api_key
         self.ssl_verify = ssl_verify
@@ -145,6 +190,8 @@ class OpenAiApi:
         self.timeout = timeout
         # total attempts per chat request (1 = no retries).
         self.retries = max(1, retries)
+        # the same budget for a request that keeps coming back 429.
+        self.rate_limit_retries = max(1, rate_limit_retries)
 
     def _request_data(self,
                       messages,
@@ -322,7 +369,9 @@ class OpenAiApi:
 
     def _post_with_retry(self, url, headers, data, stream, interrupt=None):
         """POST one chat request, retrying the transient failures (network
-        errors, 429/5xx) with a short doubling backoff. returns the 200
+        errors, 429/5xx) with a doubling backoff - a longer one, over more
+        attempts (self.rate_limit_retries), for a 429 - or after the wait the
+        server's Retry-After header asks for. returns the 200
         response; raises ApiError once the attempts run out or on a permanent
         failure. a streaming caller gets the response back before any body was
         read, so a retry here never duplicates streamed output. a set
@@ -332,6 +381,7 @@ class OpenAiApi:
         while True:
             attempt += 1
             status = None
+            reply_headers = None
             try:
                 r = requests.post(url,
                                   headers=headers,
@@ -345,13 +395,15 @@ class OpenAiApi:
                 if r.status_code == 200:
                     return r
                 status = r.status_code
+                reply_headers = r.headers
                 error = f"request {url} failed with {status}: {r.text[:300]}"
                 r.close()
-            if not _retryable(status) or attempt >= self.retries:
+            attempts = self.rate_limit_retries if status == 429 else self.retries
+            if not _retryable(status) or attempt >= attempts:
                 raise ApiError(error, status=status)
-            delay = _RETRY_BACKOFF * (2 ** (attempt - 1))
+            delay = _retry_delay(status, attempt, reply_headers)
             log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
-                        error, delay, attempt, self.retries)
+                        error, delay, attempt, attempts)
             if interrupt is None:
                 time.sleep(delay)
             elif interrupt.wait(delay):
@@ -565,7 +617,8 @@ class SystemOneApi:
                  api_key,
                  ssl_verify=True,
                  timeout=(10, 120),
-                 retries=3):
+                 retries=3,
+                 rate_limit_retries=5):
         self.base_url = base_url
         self.api_key = api_key
         self.url = f"{base_url}/systemone"
@@ -579,6 +632,7 @@ class SystemOneApi:
             timeout = tuple(timeout)
         self.timeout = timeout
         self.retries = max(1, retries)
+        self.rate_limit_retries = max(1, rate_limit_retries)
 
     def system_one(self, state, questions, model):
         """One System One request: a POST to self.url carrying a `state` (a
@@ -604,8 +658,9 @@ class SystemOneApi:
         "technical", "probabilities": {...}, "confidence": 0.82}, {"type":
         "score", "score": 1.6, "legend": {...}, "probabilities": {...},
         "confidence": 0.78} - and `usage` the token counts. transient failures
-        (network errors, 429/5xx) are retried up to self.retries attempts with a
-        short doubling backoff; anything else raises ApiError."""
+        (network errors, 429/5xx) are retried up to self.retries attempts
+        (self.rate_limit_retries for a 429) with a doubling backoff or the
+        server's Retry-After; anything else raises ApiError."""
         url = self.url
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -620,6 +675,7 @@ class SystemOneApi:
         while True:
             attempt += 1
             status = None
+            reply_headers = None
             try:
                 r = requests.post(url,
                                   headers=headers,
@@ -632,13 +688,15 @@ class SystemOneApi:
                 if r.status_code == 200:
                     break
                 status = r.status_code
+                reply_headers = r.headers
                 error = f"request {url} failed with {status}: {r.text[:300]}"
                 r.close()
-            if not _retryable(status) or attempt >= self.retries:
+            attempts = self.rate_limit_retries if status == 429 else self.retries
+            if not _retryable(status) or attempt >= attempts:
                 raise ApiError(error, status=status)
-            delay = _RETRY_BACKOFF * (2 ** (attempt - 1))
+            delay = _retry_delay(status, attempt, reply_headers)
             log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
-                        error, delay, attempt, self.retries)
+                        error, delay, attempt, attempts)
             time.sleep(delay)
 
         try:

@@ -98,6 +98,7 @@ from cai import config
 class FakeSystemOneResponse:
     def __init__(self, body, status_code=200):
         self.status_code = status_code
+        self.headers = {}
         self.text = "error-body"
         self._body = body
 

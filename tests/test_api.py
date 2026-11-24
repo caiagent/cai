@@ -22,8 +22,10 @@ class FakeResponse:
     """Stand-in for a requests.Response covering both the blocking
     (status_code/json) and streaming (iter_lines/context-manager) paths."""
 
-    def __init__(self, status_code=200, body=None, lines=None, raise_json=False):
+    def __init__(self, status_code=200, body=None, lines=None, raise_json=False,
+                 headers=None):
         self.status_code = status_code
+        self.headers = headers or {}
         self.text = "error-body"
         self._body = body
         self._lines = lines or []
@@ -96,6 +98,7 @@ def install(monkeypatch, response=None, exc=None, script=None):
     monkeypatch.setattr(api.requests, "post", rec)
     # retries wait between attempts; a test never should.
     monkeypatch.setattr(api, "_RETRY_BACKOFF", 0)
+    monkeypatch.setattr(api, "_RATE_LIMIT_BACKOFF", 0)
     return rec
 
 
@@ -349,6 +352,66 @@ def test_blocking_429_retried_then_succeeds(monkeypatch):
     content, _, _, _ = client().chat([], "m")
     assert content == "ok"
     assert len(rec.calls) == 2
+
+
+def record_sleeps(monkeypatch):
+    """swap the api module's sleep for a recorder; returns the waits asked for."""
+    waits = []
+    monkeypatch.setattr(api.time, "sleep", waits.append)
+    return waits
+
+
+def test_429_exhausts_the_rate_limit_attempts_with_longer_backoff(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(status_code=429))
+    monkeypatch.setattr(api, "_RATE_LIMIT_BACKOFF", 5.0)
+    waits = record_sleeps(monkeypatch)
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m")
+    assert err.value.status == 429
+    assert len(rec.calls) == 5          # rate_limit_retries, not retries
+    assert waits == [5.0, 10.0, 20.0, 40.0]
+
+
+def test_429_honors_retry_after_seconds(monkeypatch):
+    script = [FakeResponse(status_code=429, headers={"Retry-After": "7"}),
+              FakeResponse(body=blocking_body(content="ok"))]
+    install(monkeypatch, script=script)
+    waits = record_sleeps(monkeypatch)
+    content, _, _, _ = client().chat([], "m")
+    assert content == "ok"
+    assert waits == [7.0]
+
+
+def test_retry_after_is_clamped(monkeypatch):
+    script = [FakeResponse(status_code=503, headers={"Retry-After": "3600"}),
+              FakeResponse(body=blocking_body(content="ok"))]
+    install(monkeypatch, script=script)
+    waits = record_sleeps(monkeypatch)
+    client().chat([], "m")
+    assert waits == [api._RETRY_AFTER_MAX]
+
+
+def test_parse_retry_after():
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+    assert api._parse_retry_after(None) is None
+    assert api._parse_retry_after("soon") is None
+    assert api._parse_retry_after("nan") is None
+    assert api._parse_retry_after(" 2.5 ") == 2.5
+    assert api._parse_retry_after("-3") == 0.0
+    future = datetime.now(timezone.utc) + timedelta(seconds=30)
+    assert 25 < api._parse_retry_after(format_datetime(future, usegmt=True)) <= 30
+    past = datetime.now(timezone.utc) - timedelta(seconds=30)
+    assert api._parse_retry_after(format_datetime(past, usegmt=True)) == 0.0
+
+
+def test_system_one_honors_retry_after(monkeypatch):
+    script = [FakeResponse(status_code=429, headers={"Retry-After": "4"}),
+              FakeResponse(body=system_one_body())]
+    install(monkeypatch, script=script)
+    waits = record_sleeps(monkeypatch)
+    decider().system_one("s", questions(), "m")
+    assert waits == [4.0]
 
 
 def test_blocking_non_200_exhausts_and_raises_with_status(monkeypatch):
