@@ -4,10 +4,7 @@ tools: python
 ---
 # Skill: Python (Read-Write)
 
-Adds write access to `python-read-only`: a snippet - and any program it runs -
-may now WRITE under the current-working-directory and the granted paths as
-well as scratch, the same policy the fs tools enforce. Nothing else is
-writable, and nothing else exists.
+{{python_sandbox_writes}}
 
 Discipline:
 - Read before you write; confirm a write landed.

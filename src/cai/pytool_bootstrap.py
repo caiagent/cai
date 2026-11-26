@@ -29,6 +29,11 @@ inherits the namespaces, so it sees the same files, the same write roots, no
 network and no host pids, kernel-enforced (audit hooks do not survive into an
 exec'd binary, which is why nothing the kernel does not enforce is gated).
 
+CAI_PY_SANDBOX picks which of the two jails go up: "kernel" (default) both,
+"hook" the audit hook only, "none" neither - the snippet then runs as an
+ordinary process of the user's, with tool_call() still wired, and nothing
+below about roots, modes or disallowed paths is enforced.
+
 CAI_DISALLOWED_PATHS entries are denied in every mode: the audit hook refuses
 them outright, and the kernel jail masks each one that a bound root would
 otherwise carry (an empty read-only tmpfs over a directory, an empty file over
@@ -588,7 +593,13 @@ def main():
     write_roots = compute_write_roots()
     denied_roots = compute_denied_roots()
 
-    if os.environ.get("CAI_PY_SANDBOX", "kernel") != "hook":
+    # "none" runs the snippet with no jail at all, "hook" with the audit hook
+    # only; anything else - "kernel", or a value we do not know - gets both.
+    sandbox = os.environ.get("CAI_PY_SANDBOX", "kernel")
+    use_kernel_jail = sandbox not in ("hook", "none")
+    use_audit_hook = sandbox != "none"
+
+    if use_kernel_jail:
         try:
             enter_kernel_jail()
         except Exception as e:
@@ -608,7 +619,8 @@ def main():
     snippet_globals["tool_call"] = tool_call
     snippet_globals.update(tool_globals())
 
-    sys.addaudithook(hook)
+    if use_audit_hook:
+        sys.addaudithook(hook)
     exec(compile(code, "<python>", "exec"), snippet_globals)
 
 

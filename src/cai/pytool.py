@@ -39,6 +39,12 @@ seccomp/AppArmor) fail closed with a clear message; there the operator - whose
 container is then the boundary - may set `python_sandbox: "hook"` in
 config.json to run with the hook layer only.
 
+`python_sandbox: "none"` turns the sandbox off altogether: no kernel jail and
+no audit hook, so a snippet is an ordinary process of the user's - the whole
+filesystem, the network, every other process - and neither the skill's mode
+below nor the allowed/disallowed paths restrict it. only tool_call() is left
+of the machinery. for a machine where the model is trusted with all of that.
+
 Which python skill is active picks the sandbox MODE (sandbox_mode):
 `python-read-only` is read-only as described above; `python` (layered on it,
 like `fs` on `fs-read-only`) widens the write policy to cwd + the
@@ -290,7 +296,7 @@ def _run_python(agent, code, timeout):
     # exist only in the child's mount namespace - in ours it stays an empty dir,
     # removed when the child is done.
     staging = None
-    if sandbox != "hook":
+    if sandbox not in ("hook", "none"):
         staging = tempfile.mkdtemp(prefix="cai-py-")
         child_env["CAI_PY_STAGING"] = staging
 

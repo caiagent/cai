@@ -16,7 +16,10 @@ Optional keys (read via load_optional, never required) may also appear:
   python_base          - base interpreter the python tool's managed venv is
                          built from (default: cai's own interpreter).
   python_sandbox       - "hook" to run the python tool with the audit-hook jail
-                         only, on hosts that forbid user namespaces.
+                         only, on hosts that forbid user namespaces; "none" to
+                         run it with no sandbox at all (full filesystem,
+                         network and process access - the skill's read-only /
+                         read-write mode and the path grants stop applying).
   python_venv          - path to an EXISTING virtualenv (e.g. a pyenv one) the
                          python tool runs snippets under, instead of the managed
                          ~/.config/cai/venv. cai never builds, rebuilds or

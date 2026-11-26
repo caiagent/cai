@@ -277,7 +277,10 @@ and opening at the cursor, so `EDITOR=code` works as is.
   user-supplied env. On hosts that forbid unprivileged user namespaces (e.g.
   default-hardened Docker) the tool fails closed — there the optional
   `python_sandbox` key set to `"hook"` runs the audit-hook jail only, the
-  container itself being the boundary. Any of these keys can also be set from
+  container itself being the boundary. `"none"` turns the sandbox off
+  altogether: a snippet then runs as an ordinary process of yours, with the
+  whole filesystem, the network and your other processes in reach, and
+  neither the skill's mode below nor the path grants restrict it. Any of these keys can also be set from
   `init.py` (`cai.settings.python_venv = "…"`), which shadows `config.json`.
 - The sandbox has two **modes**, granted by which python skill you activate
   (so a sub-agent given `python-read-only` stays read-only while its parent

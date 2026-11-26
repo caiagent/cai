@@ -501,6 +501,37 @@ def test_hook_mode_skips_the_kernel_jail(tmp_path, monkeypatch):
         agent.close()
 
 
+def test_none_mode_runs_with_no_sandbox_at_all(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "none")
+    monkeypatch.chdir(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    made = []
+    real_mkdtemp = pytool.tempfile.mkdtemp
+
+    def spy_mkdtemp(*args, **kwargs):
+        made.append(real_mkdtemp(*args, **kwargs))
+        return made[-1]
+    monkeypatch.setattr(pytool.tempfile, "mkdtemp", spy_mkdtemp)
+    agent = _agent_with_echo()
+    try:
+        # no kernel jail: the host filesystem is visible, and no staging dir
+        # was made for one.
+        assert _run(agent, STAT_PROBE).strip() == "visible"
+        assert made == []
+        # no audit hook either: reads and writes outside the roots just work,
+        # even under the read-only skill...
+        assert "PermissionError" not in _run(agent, "print(len(open('/etc/hostname').read()))")
+        _run(agent, f"open({str(outside)!r}, 'w').write('x')")
+        assert outside.read_text() == "x"
+        # ...and the agent's tools are still callable from the snippet.
+        assert _run(agent, "print(echo(x=3))").strip() == "echo:3"
+    finally:
+        agent.close()
+        if outside.exists():
+            outside.unlink()
+
+
 # --- modes ------------------------------------------------------------------
 
 def _agent_with_skill(skill, scratch=None):
