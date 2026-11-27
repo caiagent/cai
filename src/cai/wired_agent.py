@@ -546,6 +546,8 @@ class WiredAgent:
             return True, agent.get_selected_skills(), None
         if op == "get_skill_tools":
             return True, agent.get_skill_tools(), None
+        if op == "get_tool_processes":
+            return True, agent.get_tool_processes(), None
         if op == "get_available_skills":
             return True, agent.get_available_skills(), None
         if op == "set_selected_skills":

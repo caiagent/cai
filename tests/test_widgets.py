@@ -274,6 +274,7 @@ def _panel(max_rows=40, max_cols=100, width=60, **overrides):
         "cwd": "/work/project",
         "skills": ["fs-read-only", "subagents"],
         "skill_tools": {"fs-read-only": ["grep", "read_file"], "subagents": ["launch_agent"]},
+        "processes": {},
         "tools": ["grep", "launch_agent", "python", "read_file"],
         "subagents": [],
         "allowed": [],
@@ -286,6 +287,7 @@ def _panel(max_rows=40, max_cols=100, width=60, **overrides):
                         fields["cwd"],
                         fields["skills"],
                         fields["skill_tools"],
+                        fields["processes"],
                         fields["tools"],
                         fields["subagents"],
                         fields["allowed"],
@@ -347,7 +349,7 @@ def test_status_panel_hides_a_skill_tool_that_was_deselected():
 
 
 def test_status_panel_colours_skills_and_tools_differently():
-    rows = _status_rows("m", "/w", ["s"], {"s": ["t"]}, ["t"], [], [], [], 0, 0, 60)
+    rows = _status_rows("m", "/w", ["s"], {"s": ["t"]}, {}, ["t"], [], [], [], 0, 0, 60)
     styles = {}
     for row in rows:
         for text, sgr in row:
@@ -392,6 +394,46 @@ def test_status_panel_gives_up_when_the_viewport_is_too_small():
     assert _panel(max_rows=4) == []
 
 
+def test_status_panel_puts_each_server_and_its_sandbox_between_skill_and_tools():
+    processes = {
+        "fs": {"kind": "local",
+               "sandbox": ["wrap", "--rw", "{scratch}", "--"],
+               "tools": ["fs__grep", "fs__read_file"]},
+        "python": {"kind": "python", "sandbox": None, "tools": ["python"]},
+        "far": {"kind": "remote", "sandbox": None, "tools": ["far__search"]},
+    }
+    plain = _panel(skills=["reader", "python"],
+                   skill_tools={"reader": ["fs__grep", "fs__read_file", "note"], "python": ["python"]},
+                   processes=processes,
+                   tools=["far__search", "fs__grep", "fs__read_file", "note", "python"])
+    at = {}
+    for i, line in enumerate(plain):
+        for needle in ("◆ reader", "▸ fs", "sandbox wrap --rw {scratch} --", "grep · read_file",
+                       "◆ python", "▸ python", "no sandbox", "▸ far", "remote, no sandbox", "search"):
+            if needle in line and needle not in at:
+                at[needle] = i
+    # skill -> its function tools -> server -> sandbox -> the server's tools
+    assert "note" in plain[at["◆ reader"] + 1]
+    assert at["◆ reader"] < at["▸ fs"] < at["sandbox wrap --rw {scratch} --"] < at["grep · read_file"]
+    # the python tool is a process too; its name is not repeated as a tool
+    assert at["◆ python"] < at["▸ python"]
+    assert at["no sandbox"] == at["▸ python"] + 1
+    # a tool no skill declares keeps its server, in the tools section
+    assert at["▸ far"] > at["▸ python"]
+    assert at["remote, no sandbox"] == at["▸ far"] + 1
+    assert at["search"] == at["▸ far"] + 2
+    body = "\n".join(plain)
+    assert "fs__grep" not in body
+
+
+def test_status_panel_clips_a_long_sandbox_command():
+    processes = {"fs": {"kind": "local", "sandbox": ["wrap"] + ["--ro", "/a/long/path"] * 20 + ["--"],
+                        "tools": ["fs__grep"]}}
+    plain = _panel(skills=[], skill_tools={}, processes=processes, tools=["fs__grep"], width=50)
+    assert len({len(line) for line in plain}) == 1
+    assert "…" in "\n".join(plain)
+
+
 class _PanelClient:
     def get_info(self):
         return {"model": "gpt-x", "cwd": "/work"}
@@ -401,6 +443,9 @@ class _PanelClient:
 
     def get_skill_tools(self):
         return {"subagents": ["grep"]}
+
+    def get_tool_processes(self):
+        return {}
 
     def get_selected_tools(self):
         return ["grep"]

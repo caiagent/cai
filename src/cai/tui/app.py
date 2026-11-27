@@ -59,7 +59,13 @@ def run(*,
     from cai.hooks import HookEvent
     from cai.models import ModelsRegistry
 
-    env = Environment.default().load()
+    try:
+        env = Environment.default().load()
+    except ValueError as e:
+        # a cai.sandbox that covers nothing (Environment.check_sandboxes):
+        # said before the screen comes up, where it can be read.
+        print(f"cai: {e}", file=sys.stderr)
+        return 2
     # the cai.settings skills / tools are auto-activated on every CLI run, merged
     # in on top of any --skill / --tool the user passed.
     skills = Environment.merge_activations(skills, env.settings.skills)

@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from cai.api import ApiError, SystemOneApi
     from cai.decision import decide
     from cai.environment import Environment, Settings
-    from cai.tools import ToolsRegistry, tool, wrap, mcp_server
+    from cai.tools import ToolsRegistry, tool, wrap, mcp_server, sandbox
     # cai.settings is served by __getattr__ at runtime; this declaration is
     # what lets an editor complete cai.settings and its attributes.
     settings: Settings
@@ -105,6 +105,7 @@ __all__ = [
     "wrap",
     "current_agent",
     "mcp_server",
+    "sandbox",
     "ApiError",
     "SystemOneApi",
     "decide",
@@ -159,6 +160,9 @@ def __getattr__(name):
     if name == "mcp_server":
         from cai.tools import mcp_server
         return mcp_server
+    if name == "sandbox":
+        from cai.tools import sandbox
+        return sandbox
     if name == "ToolsRegistry":
         from cai.tools import ToolsRegistry
         return ToolsRegistry

@@ -72,7 +72,7 @@ only cai's pane is recoloured.
 
 `~/.config/cai/init.py` is optional Python imported on every load, after the
 extensions — so its registrations win. Everything the SDK registers works
-here: MCP servers, settings, tools, hooks, commands, renderers.
+here: MCP servers, sandboxes, settings, tools, hooks, commands, renderers.
 
 ```python
 import cai
@@ -85,6 +85,10 @@ cai.mcp_server("linear",
                url="https://mcp.linear.app/mcp",
                headers={"Authorization": "Bearer ..."})
 
+# sandboxes - the command a tool process runs behind (see "Sandboxing tool
+# processes"): the python tool, an MCP server by name, or "*" for the rest
+cai.sandbox("python", ["bwrap", "--ro-bind", "/", "/", "--bind", "{scratch}", "{scratch}"])
+
 # settings - the same object the TUI's :config overlay edits
 cai.settings.show_reasoning = False
 cai.settings.tool_result_max_chars = 20_000
@@ -94,7 +98,7 @@ cai.settings.tools.append("github__search_issues")
 
 # any config.json field can be shadowed from here: a non-None cai.settings
 # attribute of the same name wins over the file (model, base_url, ssl_verify,
-# default_context_size, python_base, python_sandbox, python_venv).
+# default_context_size, python_base, python_venv).
 cai.settings.model = "anthropic/claude-sonnet-4"
 cai.settings.python_venv = "~/.pyenv/versions/cai-tools"  # run the python tool
                                                           # under your own env
@@ -134,13 +138,12 @@ only — a one-off test of another provider without touching the config.
 `--allowed-paths p1 p2` grants tools access to files or directories beyond the
 working directory — one or more paths, space-separated like `--skill` — a
 directory grants its subtree, a file just that file
-(published as `CAI_ALLOWED_PATHS`, which `cai.safe_path` and every spawned
-tool process honor; read-only inside the python-tool jail).
+(published as `CAI_ALLOWED_PATHS`, which `cai.safe_path` and the fs tools
+honor; the python tool does not — see
+[Sandboxing tool processes](#sandboxing-tool-processes)).
 `--disallowed-paths p1 p2` is the mirror image: files or directories tools may
 never touch, even inside the working directory or a grant — a deny always
-wins (published as `CAI_DISALLOWED_PATHS`; the python-tool jail masks each
-one with an empty read-only mount, so spawned programs cannot see them
-either). Both lists can be changed mid-session: `:allow p1,p2` /
+wins (published as `CAI_DISALLOWED_PATHS`). Both lists can be changed mid-session: `:allow p1,p2` /
 `:disallow p1,p2` replace a list (comma-separated there, since a command
 takes one argument), bare `:allow` shows it, `:allow -` clears it — tool
 servers restart under the new policy between turns.
@@ -178,9 +181,10 @@ troubleshooting; `cai.settings.keep_requests` sets how many, default 200, 0
 for none), `:history`, `:sessions`, `:save`, `:load`,
 `:tools`, `:skills`, `:pwd` (print the agent's working directory),
 `:status` (Tab: a framed status window in the middle of the
-conversation - model, working directory, active skills and tools, live
-sub-agents, path grants, pending counts - kept current while shown; any
-key closes it),
+conversation - model, working directory, each active skill with the MCP
+servers behind its tools, the sandbox each server runs behind (or `no
+sandbox`) and the tools under it, live sub-agents, path grants, pending
+counts - kept current while shown; any key closes it),
 `:checkout` (Ctrl-W T in normal mode: branch the session - conversation,
 model, skills, tools - into a new tab, a session of its own from there on;
 `gt` / `gT` or `:tabnext` / `:tabprev` move between tabs, `:tabclose` or
@@ -235,7 +239,7 @@ and opening at the cursor, so `EDITOR=code` works as is.
   `cai.mcp_server` (see [Configuration](#initpy)) — local or remote.
 - **Skills** are markdown files: a small header (`tools:`, `skills:`) plus a
   prompt body. Activating one unions its tools into the registry and appends
-  its body to the system prompt. Built in: `fs`, `fs-read-only`, `subagents`.
+  its body to the system prompt. Built in: `fs`, `fs-read-only`, `python`, `subagents`.
 - A skill body may carry `{{name}}` **slots** — holes re-filled at the start
   of every turn, so a skill can *push* live state into the system prompt
   instead of making the model call a tool to fetch it. `{{tools}}` is built in
@@ -251,49 +255,75 @@ and opening at the cursor, so `EDITOR=code` works as is.
   key never reaches the provider - the model reads the content wrapped in a
   `[sub-agent report]` envelope instead - while the TUI, `--tail`, and your
   hooks (`cai.origin_of(message)`) can tell a report from a prompt you typed.
-- The `python-read-only` skill gives the agent a `python(code, timeout=60)` tool that
+- The `python` skill gives the agent a `python(code, timeout=60)` tool that
   runs a snippet in a subprocess of a cai-managed virtualenv
   (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only;
   manage its packages with `cai python install|uninstall|list-packages`).
-  The snippet is jailed at the **kernel level**: it enters fresh user + mount +
-  network + pid namespaces and pivots onto a root containing only the working
-  directory, the session scratch dir, the interpreter and the system library
-  dirs its C extensions load from — no other path exists, there is no
-  network interface, and no host process is addressable (the snippet is pid 1
-  of its own namespace, so it cannot signal cai or anything else of yours).
-  The whole tree is mounted
-  **read-only except the scratch dir**, the one writable island. On top of
-  that, a `sys.addaudithook` jail enforces the same policy: it can read files
-  and list directories inside the jail but create, modify or delete only under
-  scratch, and subprocess/`ctypes`/`cffi` are blocked. The snippet also gets a
-  `tool_call(name, **kwargs)` builtin that dispatches the agent's *own* selected
-  tools in-process — through the same `before_tool_call` gates — so a script
-  can read a large tool result, reduce it in Python, and return only the
-  answer, the intermediate data never entering model context (and any file
-  changes go through a write tool like `fs__create_file`, under its own gate).
   Point it at a different base interpreter with the optional `python_base` key
   in `config.json`, or run it under an existing virtualenv of your own (e.g. a
   `pyenv` one) with `python_venv` — cai never builds, rebuilds or deletes a
-  user-supplied env. On hosts that forbid unprivileged user namespaces (e.g.
-  default-hardened Docker) the tool fails closed — there the optional
-  `python_sandbox` key set to `"hook"` runs the audit-hook jail only, the
-  container itself being the boundary. `"none"` turns the sandbox off
-  altogether: a snippet then runs as an ordinary process of yours, with the
-  whole filesystem, the network and your other processes in reach, and
-  neither the skill's mode below nor the path grants restrict it. Any of these keys can also be set from
-  `init.py` (`cai.settings.python_venv = "…"`), which shadows `config.json`.
-- The sandbox has two **modes**, granted by which python skill you activate
-  (so a sub-agent given `python-read-only` stays read-only while its parent
-  runs `python`): `python-read-only` — writes under scratch only, as above;
-  `python` — layered on it like `fs` on `fs-read-only`, writes also allowed
-  under the working directory and the `--allowed-paths` grants (the same
-  policy the fs tools enforce, the `--disallowed-paths` denies included).
-  Both may run programs: the jail
-  carries the system binary dirs read-only, and a spawned process inherits
-  the namespaces, so it sees the same files, the same write roots, no network
-  and no host pids, all kernel-enforced. No mode grants network. Under
-  `python_sandbox: "hook"` spawned programs are confined by your container
-  only.
+  user-supplied env. Either key can also be set from `init.py`
+  (`cai.settings.python_venv = "…"`), which shadows `config.json`.
+  The snippet gets a `tool_call(name, **kwargs)` builtin that dispatches the
+  agent's *own* selected tools in-process — through the same
+  `before_tool_call` gates — so a script can read a large tool result, reduce
+  it in Python, and return only the answer, the intermediate data never
+  entering model context.
+- There is one python tool and it has no modes: **what a snippet may read,
+  write and reach is decided by the sandbox you run it behind**, and by
+  nothing else. With none, a snippet is an ordinary process of yours — the
+  whole filesystem, the network, your other processes — and
+  `--allowed-paths` / `--disallowed-paths` (the fs tools' policy) do not
+  restrict it. See [Sandboxing tool processes](#sandboxing-tool-processes).
+
+### Sandboxing tool processes
+
+`cai.sandbox(name, command)` in `init.py` (yours or an extension's) runs a
+tool process behind a command of your choice — any wrapper that takes the
+command to run as its last arguments (`bwrap`, `firejail`,
+`docker run …`):
+
+```python
+# the python tool: everything read-only, the scratch directory writable
+cai.sandbox("python", ["bwrap", "--ro-bind", "/", "/", "--bind", "{scratch}", "{scratch}"])
+# one MCP server
+cai.sandbox("github", ["firejail", "--profile=tools"])
+# every other tool process: read-only, no network
+cai.sandbox("*", ["bwrap", "--ro-bind", "/", "/", "--unshare-net"])
+# this one: no sandbox
+cai.sandbox("fs", None)
+```
+
+- `name` is `python`, the name of a local MCP server (a `mcps/<name>.py` file
+  or a `cai.mcp_server` command), or `*` for every tool process without a
+  registration of its own. A later registration of a name wins, so your
+  top-level `init.py` overrides what an extension set.
+- `{scratch}` and `{cwd}` in an argument become the agent's scratch directory
+  and the working directory — the two paths a wrapper usually has to be told
+  to show.
+- A wrapper may start its command with a clean environment, so cai does not
+  count on the inherited one: its own `CAI_*` variables (and a declared
+  server's `env=`) are handed over through `env(1)`, placed between your
+  command and the tool's. Anything else the process needs from the
+  environment, and every path it needs to see (the interpreter, the venv),
+  is for the wrapper's own flags.
+- The unit is a **process**. All tools of one MCP server share its sandbox;
+  function tools (`@cai.tool`) run inside cai and remote servers (`url=`) run
+  elsewhere, so neither can have one.
+- A sandbox that would cover nothing is an error, not a silent no-op: once
+  everything is loaded, a name that is not `python`, `*` or a local MCP
+  server - a misspelling, a function tool, a remote server, a single tool of
+  a server - stops cai at startup with a message saying which it is. The
+  order inside `init.py` does not matter; a server may be declared after
+  the line that sandboxes it.
+- `:status` (Tab) shows, under each skill, every MCP server and the python
+  tool with the sandbox command it runs behind.
+- `tool_call()` crosses the python sandbox on purpose: the pipes it uses are
+  inherited, so a sandboxed snippet can still have cai run any tool the agent
+  has selected — outside the sandbox, under that tool's own rules. Select
+  only tools you would let the sandboxed code use.
+- The `python` skill tells the model whether its snippets are sandboxed, not
+  how; describe the sandbox in a skill of your own if the model should know.
 
 ## Extensions
 

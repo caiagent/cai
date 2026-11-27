@@ -27,7 +27,9 @@ remote agent:
 
 The control ops are get_info, get_messages/set_messages, set_model,
 get_selected_skills/get_available_skills/set_selected_skills, get_skill_tools
-(which active skill declares which tools), the matching tools trio, and
+(which active skill declares which tools), get_tool_processes (which MCP
+server or python process serves which selected tools, and its sandbox), the
+matching tools trio, and
 drain_errors (the errors the agent recovered from and has not reported yet,
 e.g. a tool that failed to load; reading clears them). PROMPT carries a UI request (confirm/select/text, or a
 one-way notify) that a hook raised mid-run via HookContext.ui; the client

@@ -1,15 +1,13 @@
 """Tests for --disallowed-paths: the CLI publishes the denied roots as
 CAI_DISALLOWED_PATHS, cai.safe_path refuses them wherever they sit (a deny
-wins over the cwd, scratch and any allowed-paths grant), spawned tool
-processes inherit the var through os.environ, and the python-tool jail
-knows them as denied roots."""
+wins over the cwd, scratch and any allowed-paths grant), and spawned tool
+processes inherit the var through os.environ."""
 import os
 
 import pytest
 
 import cai
 from cai import cli
-from cai import pytool_bootstrap
 from cai.tools import ToolsRegistry
 
 
@@ -127,12 +125,3 @@ def test_spawned_fs_server_inherits_the_deny(tmp_path, monkeypatch):
         assert "disallowed" in out
     finally:
         registry.close()
-
-
-def test_jail_denied_roots_follow_the_var(tmp_path, monkeypatch):
-    secret = tmp_path / "secret"
-    secret.mkdir()
-    monkeypatch.setenv("CAI_DISALLOWED_PATHS", str(secret))
-    assert pytool_bootstrap.compute_denied_roots() == [str(secret)]
-    monkeypatch.delenv("CAI_DISALLOWED_PATHS")
-    assert pytool_bootstrap.compute_denied_roots() == []

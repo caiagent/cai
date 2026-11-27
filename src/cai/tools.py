@@ -114,6 +114,45 @@ class _StderrTail(threading.Thread):
         return "\n".join(lines[-_STDERR_LINES:])
 
 
+def sandboxed_command(prefix, command, env=None, scratch=None):
+    """the argv that runs `command` inside the sandbox `prefix` (an argv list
+    registered with cai.sandbox, e.g. ["bwrap", "--ro-bind", "/", "/", "--bind",
+    "{scratch}", "{scratch}"]):
+
+        prefix + ["env", "NAME=value", ...] + command
+
+    two holes are filled in the prefix's arguments: {scratch} with `scratch`
+    (the agent's scratch directory - ValueError when the prefix names it and
+    there is none) and {cwd} with the working directory.
+
+    a sandbox may start its command with an environment of its own, so the
+    variables the tool process cannot work without do not ride on the
+    inherited one: every CAI_* variable of this process and everything in
+    `env` are handed over through env(1), which runs inside the sandbox.
+    anything else the process needs from the environment is the sandbox
+    command's business."""
+    argv = []
+    for arg in prefix:
+        if "{scratch}" in arg:
+            if not scratch:
+                raise ValueError("the sandbox command names {scratch}, but there is no scratch directory")
+            arg = arg.replace("{scratch}", scratch)
+        if "{cwd}" in arg:
+            arg = arg.replace("{cwd}", os.getcwd())
+        argv.append(arg)
+    carried = {}
+    for key, value in os.environ.items():
+        if not key.startswith("CAI_"): continue
+        carried[key] = value
+    carried.update(env or {})
+    if carried:
+        argv.append("env")
+        for key in sorted(carried):
+            argv.append(f"{key}={carried[key]}")
+    argv.extend(command)
+    return argv
+
+
 class LocalMCPServer:
     """One MCP stdio server subprocess, spoken to over line-delimited JSON-RPC.
     The loop runs tools one at a time, so this stays single-threaded: write a
@@ -130,12 +169,19 @@ class LocalMCPServer:
 
     The server leads its own session (start_new_session) so the tree kill
     is one killpg, and so a Ctrl-C SIGINT on cai's own terminal never
-    reaches it: the loop decides when a tool stops, not the tty."""
+    reaches it: the loop decides when a tool stops, not the tty.
 
-    def __init__(self, command, label, env=None, cwd=None):
+    With `sandbox` (the argv prefix cai.sandbox registered for this server)
+    the command runs behind it - see sandboxed_command; `scratch` fills the
+    prefix's {scratch} hole."""
+
+    def __init__(self, command, label, env=None, cwd=None, sandbox=None, scratch=None):
         self.label = label
         self._command = command
         self._cwd = cwd
+        self._env = env
+        self._sandbox = sandbox
+        self._scratch = scratch
         self._popen_env = None
         if env is not None:
             self._popen_env = dict(os.environ)
@@ -152,7 +198,15 @@ class LocalMCPServer:
         request ids restart with it: the new process has never seen any."""
         self._req_id = 0
         self._buf.clear()
-        self._process = subprocess.Popen(self._command,
+        command = self._command
+        if self._sandbox is not None:
+            # built per spawn, so a respawn carries the CAI_* variables as
+            # they are now (a path grant changed since the first start).
+            command = sandboxed_command(self._sandbox,
+                                        command,
+                                        env=self._env,
+                                        scratch=self._scratch)
+        self._process = subprocess.Popen(command,
                                          stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE,
@@ -485,12 +539,13 @@ def _function_tool_name(fn):
     return getattr(fn, "_cai_tool_name", fn.__name__)
 
 
-def server_from_spec(name, spec, extra_env=None):
+def server_from_spec(name, spec, extra_env=None, sandbox=None, scratch=None):
     """build a live MCP server connection from a declared spec - a
     RemoteMCPServer for a url spec, a LocalMCPServer for a command one.
     extra_env (the registry's CAI_SCRATCH/CAI_AGENT injection) is merged under a command
     spec's own env - a declared variable wins; a url server has no process to
-    inject into, so it is ignored there."""
+    inject into, so it is ignored there, and so are sandbox (the cai.sandbox
+    prefix a command server runs behind) and scratch (its {scratch} hole)."""
     if "url" in spec:
         return RemoteMCPServer(spec["url"], name,
                                headers=spec.get("headers"),
@@ -500,7 +555,12 @@ def server_from_spec(name, spec, extra_env=None):
         merged = dict(extra_env)
         merged.update(env or {})
         env = merged
-    return LocalMCPServer(spec["command"], name, env=env, cwd=spec.get("cwd"))
+    return LocalMCPServer(spec["command"],
+                          name,
+                          env=env,
+                          cwd=spec.get("cwd"),
+                          sandbox=sandbox,
+                          scratch=scratch)
 
 
 def schema_from_function(fn):
@@ -802,6 +862,18 @@ class ToolsRegistry:
             return self._functions[name]
         return name
 
+    def process_of(self, name):
+        """the tool process behind the registered tool `name`: an MCP
+        server's name, "python" for the python tool, or None for a function
+        tool, which runs in cai's own process."""
+        entry = self._dispatch.get(name)
+        if entry is None:
+            return None
+        if entry[0] == "mcp":
+            return entry[1]
+        fn = self._functions.get(name)
+        return getattr(fn, "_cai_tool_process", None)
+
     def _is_name_free(self, name):
         if name in self._dispatch:
             raise ValueError(f"tool name collision: {name!r}")
@@ -875,20 +947,33 @@ class ToolsRegistry:
         """the live server for mcp_name, connected once and cached in this
         registry. a server declared on the env via cai.mcp_server wins; otherwise
         its source file is resolved from the env's mcp dirs (the extension dirs
-        first, then the builtins) and spawned as a stdio subprocess."""
+        first, then the builtins) and spawned as a stdio subprocess - behind
+        the sandbox cai.sandbox registered for it, when there is one."""
         server = self._mcp_servers.get(mcp_name)
         if server is not None:
             return server
         extra_env = self._spawn_env()
+        sandbox = self.env.sandbox_for(mcp_name)
+        scratch = None
+        if extra_env is not None:
+            scratch = extra_env.get("CAI_SCRATCH")
         spec = self.env.server_spec(mcp_name)
         if spec is not None:
-            server = server_from_spec(mcp_name, spec, extra_env=extra_env)
+            server = server_from_spec(mcp_name,
+                                      spec,
+                                      extra_env=extra_env,
+                                      sandbox=sandbox,
+                                      scratch=scratch)
         else:
             path = _mcp_server_path(mcp_name, self.env.mcp_dirs())
             if path is None:
                 raise FileNotFoundError(
                     f"no MCP server {mcp_name!r} declared, or in any extension mcps dir or builtins")
-            server = LocalMCPServer([sys.executable, path], mcp_name, env=extra_env)
+            server = LocalMCPServer([sys.executable, path],
+                                    mcp_name,
+                                    env=extra_env,
+                                    sandbox=sandbox,
+                                    scratch=scratch)
         self._mcp_servers[mcp_name] = server
         return server
 
@@ -1048,3 +1133,38 @@ def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None, s
                                          headers=headers,
                                          cwd=cwd,
                                          ssl_verify=ssl_verify)
+
+
+def sandbox(name, command):
+    """run a tool process inside a sandbox, from init.py:
+
+        # the python tool: everything read-only, scratch writable
+        cai.sandbox("python", ["bwrap", "--ro-bind", "/", "/", "--bind", "{scratch}", "{scratch}"])
+        cai.sandbox("github", ["firejail", "--profile=tools"])              # one MCP server
+        cai.sandbox("*", ["bwrap", "--ro-bind", "/", "/", "--unshare-net"])  # every other one
+        cai.sandbox("fs", None)                                             # this one: none
+
+    `name` is "python" for the python tool, the name of a local MCP server
+    (a mcps/<name>.py file or a cai.mcp_server command), or "*" for every
+    tool process without a registration of its own. `command` is an argv
+    list; the process's own command is appended to it, so any wrapper that
+    takes a command to run works. None means no sandbox.
+
+    {scratch} and {cwd} in an argument are replaced with the agent's scratch
+    directory and the working directory. cai passes its own CAI_* variables
+    (and a declared server's env=) to the process through env(1), whatever
+    the wrapper does with the environment - see sandboxed_command.
+
+    what the process can then read, write and reach is what the wrapper
+    allows; cai does not look inside it. a sandbox covers a process: function
+    tools (cai.tool) run in cai itself and remote MCP servers (url=) run
+    elsewhere, so neither can have one.
+
+    any name is taken here, since the server it names may be declared later;
+    one that turns out to cover nothing - a misspelling, a function tool, a
+    remote server - is refused once all is registered, at the end of
+    Environment.load() and by each new Agent (Environment.check_sandboxes).
+
+    it lands on the env being load()ed - else the process default; a later
+    registration of the same name wins. see Environment.sandbox_for."""
+    Environment.target().register_sandbox(name, command)

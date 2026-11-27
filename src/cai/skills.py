@@ -22,8 +22,8 @@ system_prompt (once per turn), so a skill can push live state to the model
 instead of making it act to fetch it. A few names are builtin: {{tools}} (the
 currently selected tools' signatures), {{allowed_paths}} (the
 CAI_ALLOWED_PATHS grants, one per line, "(none)" without any), and
-{{python_sandbox}} / {{python_sandbox_writes}} (what the python tool's sandbox
-allows under the current `python_sandbox` setting); any other name
+{{python_sandbox}} (whether the python tool runs behind a sandbox
+registered with cai.sandbox, and what that means for a snippet); any other name
 resolves to a filler registered via the cai.slot decorator, called with a
 SlotContext:
 
@@ -42,7 +42,6 @@ import re
 import logging
 from dataclasses import dataclass
 
-from cai import config
 from cai import paths
 from cai.environment import Environment
 
@@ -51,7 +50,7 @@ log = logging.getLogger("cai")
 
 
 # a {{name}} hole in a skill body: a builtin ({{tools}}, {{allowed_paths}},
-# {{python_sandbox}}, {{python_sandbox_writes}}) or a cai.slot filler.
+# {{python_sandbox}}) or a cai.slot filler.
 _SLOT_RE = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
 
 
@@ -94,8 +93,8 @@ class Skill:
 def _allowed_paths_slot():
     """fills {{allowed_paths}}: the working directory by its real path, then
     the CAI_ALLOWED_PATHS grants labelled as extras on top of it, then the
-    CAI_DISALLOWED_PATHS denies - realpath'd, the same lists safe_path and the
-    python jail honour. naming the cwd keeps the model from mistaking a grant
+    CAI_DISALLOWED_PATHS denies - realpath'd, the same lists safe_path
+    honours. naming the cwd keeps the model from mistaking a grant
     for its working directory."""
     lines = [f"working directory (relative paths resolve here): {os.path.realpath(os.getcwd())}"]
     granted = paths.allowed_paths()
@@ -115,27 +114,23 @@ def _allowed_paths_slot():
     return "\n".join(lines)
 
 
-# what the python-read-only skill tells the model the sandbox allows. the
-# skill's rules must match what the tool enforces, and that depends on the
-# `python_sandbox` setting - hence a slot, filled on every read.
-_PYTHON_SANDBOX_ON = """\
-- Read/List only paths listed here and scratch (`os.environ['CAI_SCRATCH']`)
-  (a directory covers its subtree, a file just itself):
+# what the python skill tells the model about where a snippet runs. that is
+# decided by the sandbox registered for the python tool (cai.sandbox), which
+# cai cannot see into - hence a slot, filled on every read, that says only
+# what cai knows: whether there is one.
+_PYTHON_SANDBOXED = """\
+- A snippet - and any program it runs (`subprocess` & co) - runs inside a
+  sandbox the user set up. Which files exist, which are writable and whether
+  there is network are whatever that sandbox allows: a missing file, a
+  permission error or a failed connection is most likely the sandbox and not
+  a bug in your code. Report it; do not try to get around it.
+- Relative paths resolve in the working directory: {cwd}
+- Scratch (`os.environ['CAI_SCRATCH']`, also `TMPDIR`) is there for
+  intermediates and for passing state between calls.
+- To change or perform anything the sandbox does not allow - use the
+  provided dedicated tools."""
 
-{allowed_paths}
-
-- Running programs is allowed (`subprocess` & co). A spawned program runs
-  inside the same sandbox: it sees the same files, writes only where you can
-  write, and has no network. `ps`-style tools don't work (no `/proc`);
-  a program needing a temp dir gets scratch via `TMPDIR`.
-- No network.
-- Writes land in scratch ONLY - use it to pass state between calls. If a task
-  needs to change the tree, ask to switch to the `python` skill instead of
-  attempting it.
-    - To change or perform any action outside of the python environment - use
-      the provided dedicated tools."""
-
-_PYTHON_SANDBOX_OFF = """\
+_PYTHON_UNSANDBOXED = """\
 - No sandbox: a snippet runs as an ordinary process of the user's. It may read
   and write any file the user can, use the network, and run any program
   (`subprocess` & co) - nothing is confined.
@@ -143,42 +138,15 @@ _PYTHON_SANDBOX_OFF = """\
 - Scratch (`os.environ['CAI_SCRATCH']`, also `TMPDIR`) is there for
   intermediates and for passing state between calls."""
 
-# the same for the python (read-write) skill's own paragraph.
-_PYTHON_WRITES_ON = """\
-Adds write access to `python-read-only`: a snippet - and any program it runs -
-may now WRITE under the current-working-directory and the granted paths as
-well as scratch, the same policy the fs tools enforce. Nothing else is
-writable, and nothing else exists."""
 
-_PYTHON_WRITES_OFF = """\
-The sandbox is off, so this skill adds nothing to `python-read-only`: a
-snippet - and any program it runs - may already write anywhere the user can."""
-
-
-def _python_sandbox_is_off():
-    """whether the python tool runs with no sandbox at all (the
-    `python_sandbox: "none"` setting - see cai.pytool)."""
-    return config.load_optional("python_sandbox", "kernel") == "none"
-
-
-def _python_sandbox_slot():
-    """fills {{python_sandbox}}: the python-read-only skill's rules about what
-    a snippet may read, write and reach - the sandbox's when it is on, a plain
-    statement that there is none when it is off."""
-    if _python_sandbox_is_off():
-        return _PYTHON_SANDBOX_OFF.format(cwd=os.path.realpath(os.getcwd()))
-    listed = []
-    for line in _allowed_paths_slot().split("\n"):
-        listed.append("  " + line)
-    return _PYTHON_SANDBOX_ON.format(allowed_paths="\n".join(listed))
-
-
-def _python_sandbox_writes_slot():
-    """fills {{python_sandbox_writes}}: what the python skill adds on top of
-    python-read-only - wider writes under the sandbox, nothing without one."""
-    if _python_sandbox_is_off():
-        return _PYTHON_WRITES_OFF
-    return _PYTHON_WRITES_ON
+def _python_sandbox_slot(env):
+    """fills {{python_sandbox}}: the python skill's rules about where a
+    snippet runs - behind the sandbox `env` has registered for the python
+    tool, or as a plain process when it has none."""
+    text = _PYTHON_UNSANDBOXED
+    if env.sandbox_for("python") is not None:
+        text = _PYTHON_SANDBOXED
+    return text.format(cwd=os.path.realpath(os.getcwd()))
 
 
 def _skill_path(name, dirs):
@@ -354,8 +322,8 @@ class SkillsRegistry:
     def _fill_slots(self, body, skill_name):
         """replace every {{name}} hole in one skill's body: {{tools}} with the
         currently selected tools' signatures, {{allowed_paths}} with the
-        CAI_ALLOWED_PATHS grants, {{python_sandbox}} and
-        {{python_sandbox_writes}} with the python tool's current rules, anything else with its cai.slot filler's
+        CAI_ALLOWED_PATHS grants, {{python_sandbox}} with where the python
+        tool runs its snippets, anything else with its cai.slot filler's
         result. an unknown name fills empty (warned); a filler that
         raises fills with an error marker (logged), so one bad slot never
         breaks the turn. a multi-line result inherits the indentation of the
@@ -375,9 +343,7 @@ class SkillsRegistry:
             if name == "allowed_paths":
                 return _allowed_paths_slot()
             if name == "python_sandbox":
-                return _python_sandbox_slot()
-            if name == "python_sandbox_writes":
-                return _python_sandbox_writes_slot()
+                return _python_sandbox_slot(self.env)
             filler = self.env.slot(name)
             if filler is None:
                 self.tools_registry.report_error(f"skill {skill_name!r}: no slot filler for {{{{{name}}}}}")

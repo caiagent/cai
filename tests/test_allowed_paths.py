@@ -1,14 +1,12 @@
 """Tests for --allowed-paths: the CLI publishes the extra roots as
-CAI_ALLOWED_PATHS, cai.safe_path admits them alongside the cwd jail, spawned
-tool processes inherit the var through os.environ, and the python-tool kernel
-jail binds them as read roots."""
+CAI_ALLOWED_PATHS, cai.safe_path admits them alongside the cwd jail, and spawned
+tool processes inherit the var through os.environ."""
 import os
 
 import pytest
 
 import cai
 from cai import cli
-from cai import pytool_bootstrap
 from cai.tools import ToolsRegistry
 
 
@@ -144,13 +142,3 @@ def test_spawned_fs_server_inherits_the_grant(tmp_path, monkeypatch):
         assert "outside working directory" in out
     finally:
         registry.close()
-
-
-def test_jail_read_roots_include_the_grant(tmp_path, monkeypatch):
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    monkeypatch.setenv("CAI_ALLOWED_PATHS", str(extra))
-    roots = pytool_bootstrap.compute_read_roots()
-    assert str(extra) in roots
-    # write roots stay scratch-only: the grant is read-only inside the jail
-    assert str(extra) not in pytool_bootstrap.compute_write_roots()

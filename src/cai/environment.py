@@ -2,7 +2,8 @@
 
 An Environment holds what used to live in process-global class stores: the
 function tools registered via cai.tool, the skill-body slot fillers registered
-via cai.slot, the MCP servers declared via cai.mcp_server, the hooks and
+via cai.slot, the MCP servers declared via cai.mcp_server, the sandboxes
+tool processes run inside (cai.sandbox), the hooks and
 commands registered via cai.hook / cai.command, the display renderers
 registered via cai.renderer, the discovered extension bundles, and the live
 Settings (cai.settings). An
@@ -43,8 +44,10 @@ from __future__ import annotations
 
 import os
 import sys
+import shutil
 import hashlib
 import logging
+import tempfile
 import threading
 import importlib.util
 from dataclasses import dataclass
@@ -114,7 +117,6 @@ class Settings:
     ssl_verify: bool = None
     default_context_size: int = None
     python_base: str = None
-    python_sandbox: str = None
     python_venv: str = None
 
 
@@ -264,6 +266,7 @@ class Environment:
         self._function_tools = {}    # exposed name -> callable
         self._slots = {}             # exposed name -> callable (skill-body slots)
         self._declared_servers = {}  # server name -> spec dict
+        self._sandboxes = {}         # tool process name (or "*") -> argv prefix, or None
         self._hooks = []             # (event, fn) pairs, registration order
         self._commands = {}          # name -> cai.commands.Command
         self._renderers = {}         # kind -> [fn], registration order (cai.renderer)
@@ -356,6 +359,9 @@ class Environment:
         finally:
             self._loading_extension = None
             Environment._loading = previous
+        # only now: an init.py may name a server in cai.sandbox before the
+        # line that declares it.
+        self.check_sandboxes()
         return self
 
     # --- registration (the decorators' backing) ---
@@ -448,6 +454,101 @@ class Environment:
         """the declared MCP servers as name -> spec dict (a copy)."""
         return dict(self._declared_servers)
 
+    def register_sandbox(self, name, command):
+        """record the sandbox a tool process runs inside (cai.sandbox's
+        backing). `name` is "python" for the python tool, an MCP server's
+        name, or "*" for every tool process that has none of its own.
+        `command` is the argv the process's own command is appended to, e.g.
+        ["firejail", "--profile=tools"]; None means no sandbox for that name,
+        which is how one process is taken out of a "*" default. a later
+        registration of the same name wins (the user's init.py runs last)."""
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"cai.sandbox: name must be a non-empty string, got {name!r}")
+        if command is None:
+            self._sandboxes[name] = None
+            return
+        if isinstance(command, str):
+            raise ValueError(f"sandbox {name!r}: command must be an argv list, not a string")
+        prefix = list(command)
+        if not prefix:
+            raise ValueError(f"sandbox {name!r}: command is empty - pass None for no sandbox")
+        for arg in prefix:
+            if isinstance(arg, str): continue
+            raise ValueError(f"sandbox {name!r}: every argument must be a string, got {arg!r}")
+        self._sandboxes[name] = prefix
+
+    def sandbox_for(self, name):
+        """the argv prefix the tool process `name` runs behind, or None when
+        it runs unsandboxed: its own registration, else the "*" default."""
+        if name in self._sandboxes:
+            prefix = self._sandboxes[name]
+        else:
+            prefix = self._sandboxes.get("*")
+        if prefix is None:
+            return None
+        return list(prefix)
+
+    def sandboxes(self):
+        """the registered sandboxes as name -> argv prefix or None (a copy)."""
+        return dict(self._sandboxes)
+
+    def process_kind(self, name):
+        """what the tool process `name` is: "python" (the python tool),
+        "local" (an MCP server cai starts: declared with command=, or a file
+        in an mcps/ dir), "remote" (an MCP server declared with url=), or
+        None when there is no such process. only "python" and "local" can
+        run behind a sandbox."""
+        from cai.tools import _mcp_server_path
+
+        if name == "python":
+            return "python"
+        spec = self._declared_servers.get(name)
+        if spec is not None:
+            if "url" in spec:
+                return "remote"
+            return "local"
+        if _mcp_server_path(name, self.mcp_dirs()) is not None:
+            return "local"
+        return None
+
+    def _sandbox_problem(self, name):
+        """why a sandbox registered under `name` would cover nothing, or None
+        when it names a process cai starts."""
+        if name == "*":
+            return None
+        kind = self.process_kind(name)
+        if kind == "remote":
+            return ("is a remote MCP server: it runs somewhere else, so there is "
+                    "no process here to put in a sandbox")
+        if kind is not None:
+            return None
+        if name in self._function_tools:
+            return ("is a function tool: it runs inside cai's own process, which "
+                    "only a sandbox around cai itself covers")
+        if "__" in name:
+            server = name.split("__", 1)[0]
+            if self.process_kind(server) is not None:
+                return (f"names one tool: a sandbox covers a whole MCP server - "
+                        f"register it for {server!r}")
+        return ('names nothing cai starts: a sandbox applies to "python", to a '
+                'local MCP server by its name, or to "*"')
+
+    def check_sandboxes(self):
+        """refuse a sandbox that covers nothing. cai.sandbox takes any name,
+        because a server may be declared after the line that sandboxes it;
+        once everything is registered (the end of load(), and each new Agent)
+        a name that is not "python", "*" or a local MCP server is an error -
+        a misspelled name, a function tool or a remote server would otherwise
+        run unconfined while the configuration says it is sandboxed. raises
+        ValueError naming every such registration."""
+        problems = []
+        for name in sorted(self._sandboxes.keys()):
+            problem = self._sandbox_problem(name)
+            if problem is None: continue
+            problems.append(f"cai.sandbox({name!r}, ...): {name!r} {problem}")
+        if problems:
+            raise ValueError("\n".join(problems))
+
     def register_hook(self, event, fn):
         """record a hook pair (cai.hook's backing; the event is validated by
         the decorator). every run of an agent on this env fires it."""
@@ -529,15 +630,31 @@ class Environment:
         its tools and then closed - nothing is left running. a declared server
         shadows an on-disk one of the same name, and an extension file shadows a
         builtin; a server that fails to start is logged and skipped."""
+        names = list(self._function_tools.keys())
+        # the servers are spawned behind their sandbox here too. there is no
+        # agent, so no scratch dir: a throwaway one stands in for a sandbox
+        # command that names {scratch}.
+        scratch = tempfile.mkdtemp(prefix="cai-scratch-")
+        try:
+            self._append_mcp_tools(names, scratch)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        return names
+
+    def _append_mcp_tools(self, names, scratch):
+        """available_tools' MCP half: append '<label>__<tool>' for every
+        declared server, then every server file across the mcp dirs."""
         from cai.tools import LocalMCPServer, server_from_spec
 
-        names = list(self._function_tools.keys())
         seen_labels = set()
         for label in sorted(self._declared_servers.keys()):
             seen_labels.add(label)
             server = None
             try:
-                server = server_from_spec(label, self._declared_servers[label])
+                server = server_from_spec(label,
+                                          self._declared_servers[label],
+                                          sandbox=self.sandbox_for(label),
+                                          scratch=scratch)
                 for tool in server.list_tools():
                     names.append(f"{label}__{tool['name']}")
             except Exception as e:
@@ -556,7 +673,10 @@ class Environment:
                 path = os.path.join(directory, filename)
                 server = None
                 try:
-                    server = LocalMCPServer([sys.executable, path], label)
+                    server = LocalMCPServer([sys.executable, path],
+                                            label,
+                                            sandbox=self.sandbox_for(label),
+                                            scratch=scratch)
                     for tool in server.list_tools():
                         names.append(f"{label}__{tool['name']}")
                 except Exception as e:
@@ -564,4 +684,3 @@ class Environment:
                 finally:
                     if server is not None:
                         server.close()
-        return names

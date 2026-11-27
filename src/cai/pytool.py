@@ -1,59 +1,24 @@
-"""pytool: the builtin `python` tool - run Python in cai's sandbox, with a
-callback into the agent's own tools.
+"""pytool: the builtin `python` tool - run a Python snippet, with a callback
+into the agent's own tools.
 
 `python(code, timeout=60)` runs a snippet in a subprocess of a cai-MANAGED
 virtualenv (config.venv_dir(), created lazily, empty by default - stdlib only,
-so its package surface is well-defined and no compiled escape hatch ships in
-it). The sandbox is two layers, both set up by the child script
-(pytool_bootstrap.py, fed to the interpreter as `python -c` source text):
+so its package surface is well-defined), or of the user's own env when
+`python_venv` names one. The child script (pytool_bootstrap.py, fed to the
+interpreter as `python -c` source text) reads the snippet, wires tool_call()
+and execs it.
 
-KERNEL layer (the boundary; default, `python_sandbox: "kernel"`). Before the
-snippet runs, the child enters fresh user + mount + network + pid namespaces
-and pivot_roots onto a tmpfs holding bind mounts of ONLY the interpreter prefixes,
-the working directory, the session scratch dir and the system library dirs the
-dynamic loader needs (so stdlib C extensions like zlib can dlopen libz & co
-even when the interpreter is not /usr-based) - every other path does not
-exist, at the kernel level, no matter how the snippet issues the syscall (this
-also closes the stat-probe leak the audit hook alone had). The empty network
-namespace has no interfaces (not even loopback), so no network, and abstract
-unix sockets die with it too. The pid namespace makes host pids unaddressable:
-the snippet (its pid 1) cannot signal cai or any other process of the user's,
-though os.kill itself is allowed. The whole mount tree is flipped READ-ONLY
-(mount_setattr, kernel >= 5.12), then the scratch dir alone is re-bound
-read-write on top - the one writable island - before capabilities are
-dropped, so the snippet can neither write outside scratch nor rearrange its
-own jail: confinement AND the write policy are both kernel-enforced.
+There is ONE python tool and it has no modes. What a snippet may read, write
+and reach is decided by the sandbox the child is started behind:
 
-HOOK layer (UX + defense in depth). A sys.addaudithook jail enforces the same
-policy in userspace: reads and directory listings are confined to cwd +
-scratch + the interpreter prefixes, every write - create, modify, delete,
-rename - is denied outside the scratch dir, as are subprocess/exec/fork,
-sockets, ctypes and cffi. A denied op raises PermissionError, whose traceback
-is the result (a mount-level EROFS would be raw and confusing). Audit hooks
-are python-level and evadable by determined code - but anything that slips
-past them is still inside the kernel jail, so the blast radius is the scratch
-dir.
+    cai.sandbox("python", ["bwrap", "--ro-bind", "/", "/", "--bind", "{scratch}", "{scratch}"])
 
-Hosts that forbid unprivileged user namespaces (e.g. default-hardened Docker
-seccomp/AppArmor) fail closed with a clear message; there the operator - whose
-container is then the boundary - may set `python_sandbox: "hook"` in
-config.json to run with the hook layer only.
-
-`python_sandbox: "none"` turns the sandbox off altogether: no kernel jail and
-no audit hook, so a snippet is an ordinary process of the user's - the whole
-filesystem, the network, every other process - and neither the skill's mode
-below nor the allowed/disallowed paths restrict it. only tool_call() is left
-of the machinery. for a machine where the model is trusted with all of that.
-
-Which python skill is active picks the sandbox MODE (sandbox_mode):
-`python-read-only` is read-only as described above; `python` (layered on it,
-like `fs` on `fs-read-only`) widens the write policy to cwd + the
-allowed-paths grants (matching safe_path exactly).
-Both may run programs and use ctypes: the jail carries the system binary
-dirs read-only, and a spawned process inherits the namespaces - same files,
-same write roots, no network, no host pids, kernel-enforced - so a program
-can do nothing the snippet could not. Skills are chosen by the user/creator,
-never the model, so a mode is a user-side grant the model cannot widen.
+puts that command in front of the interpreter's (see cai.tools.sandbox and
+sandboxed_command), and the sandbox alone is the boundary - cai neither looks
+inside it nor adds a jail of its own. With no sandbox registered the snippet
+is an ordinary process of the user's: the whole filesystem, the network,
+every other process. The --allowed-paths / --disallowed-paths grants are the
+fs tools' policy and do not reach a snippet either way.
 
 The snippet is also handed a `tool_call(name, **kwargs) -> str` builtin: it names one
 of the agent's OWN selected tools, and the call is dispatched IN the cai process
@@ -62,12 +27,13 @@ the run's before/after_tool_call hooks (so a gate still vetoes it), and the
 result string comes back into the snippet. Only what the snippet print()s becomes
 the tool result - so a script can read a big tool result, reduce it in Python,
 and return just the answer, the intermediate data never entering model context.
-The RPC pipes are plain inherited fds, which namespaces do not sever - the
-tool_call() channel is the one deliberate hole in the jail.
+The RPC pipes are plain inherited fds, which a sandbox does not sever - so the
+tool_call() channel reaches OUT of the sandbox: a sandboxed snippet can still
+have cai run any tool the agent has selected.
 
 The tool is bound to its Agent (like the sub-agent tools) - that is what gives
 tool_call() a live dispatch. It is registered on every agent but only offered to the
-model when a python skill selects it."""
+model when the python skill selects it."""
 
 import json
 import os
@@ -83,21 +49,10 @@ import time
 import cai
 from cai import config
 from cai import hooks
+from cai.tools import sandboxed_command
 
 
 PY_TOOL_NAME = "python"
-
-
-def sandbox_mode(agent):
-    """the sandbox mode the agent's active python skill grants:
-    `python-read-only` is read-only (also the default with no python skill),
-    `python` widens writes to cwd + the allowed-paths grants. skills are
-    chosen by the user/creator, never the model, so the mode is a user-side
-    grant; the wider active one wins."""
-    active = agent.skills
-    if "python" in active:
-        return "read-write"
-    return "read-only"
 
 
 # the child bootstrap lives in pytool_bootstrap.py - a real module so it
@@ -164,7 +119,7 @@ def ensure_venv():
 
 def install(packages):
     """`cai python install` - pip-install packages into the managed venv, from
-    outside the sandbox (the jail has no network, so a snippet never can)."""
+    outside the sandbox (which may well have no network)."""
     python = ensure_venv()
     result = subprocess.run([python, "-m", "pip", "install"] + list(packages))
     return result.returncode
@@ -264,24 +219,25 @@ def _serve(agent, proc, req_r, rep_w, timeout):
 
 
 def _run_python(agent, code, timeout):
-    """spawn the sandboxed child, feed it the snippet, serve its tool calls, and
-    return its combined stdout/stderr (truncated), with an exit-code footer."""
+    """spawn the child - behind the python sandbox, when one is registered -
+    feed it the snippet, serve its tool calls, and return its combined
+    stdout/stderr (truncated), with an exit-code footer."""
     python = ensure_venv()
     scratch = cai.scratch_dir()
-    sandbox = config.load_optional("python_sandbox", "kernel")
 
     req_r, req_w = os.pipe()   # child -> parent: tool_call() requests
     rep_r, rep_w = os.pipe()   # parent -> child: results
-    child_env = dict(os.environ)
+    # what the child cannot run without. kept apart from the inherited
+    # environment because a sandbox may not pass that one on - see
+    # sandboxed_command.
+    own_env = {}
     if scratch:
-        child_env["CAI_SCRATCH"] = scratch
-        # /tmp does not exist inside the jail - point tempfile (and, in exec
-        # mode, spawned programs honoring TMPDIR) at the writable island.
-        child_env["TMPDIR"] = scratch
-    child_env["CAI_PY_RPC_READ"] = str(rep_r)
-    child_env["CAI_PY_RPC_WRITE"] = str(req_w)
-    child_env["CAI_PY_SANDBOX"] = str(sandbox)
-    child_env["CAI_PY_MODE"] = sandbox_mode(agent)
+        own_env["CAI_SCRATCH"] = scratch
+        # a sandbox's /tmp may be missing, private or read-only - point
+        # tempfile (and spawned programs honoring TMPDIR) at scratch.
+        own_env["TMPDIR"] = scratch
+    own_env["CAI_PY_RPC_READ"] = str(rep_r)
+    own_env["CAI_PY_RPC_WRITE"] = str(req_w)
     # the agent's own selected tools, minus python itself: the child turns each
     # into a directly-callable function in the snippet's namespace (layer that
     # makes the modified env look ordinary - fs__read_file(...) just works),
@@ -290,21 +246,19 @@ def _run_python(agent, code, timeout):
     for name in agent.tools:
         if name == PY_TOOL_NAME: continue
         names.append(name)
-    child_env["CAI_PY_TOOLS"] = json.dumps(names)
-
-    # the mount point the child's kernel jail pivots onto. the tmpfs and binds
-    # exist only in the child's mount namespace - in ours it stays an empty dir,
-    # removed when the child is done.
-    staging = None
-    if sandbox not in ("hook", "none"):
-        staging = tempfile.mkdtemp(prefix="cai-py-")
-        child_env["CAI_PY_STAGING"] = staging
+    own_env["CAI_PY_TOOLS"] = json.dumps(names)
+    child_env = dict(os.environ)
+    child_env.update(own_env)
 
     out = tempfile.TemporaryFile()
     proc = None
     ended = None
     try:
-        proc = subprocess.Popen([python, "-c", _bootstrap_source()],
+        command = [python, "-c", _bootstrap_source()]
+        sandbox = agent.env.sandbox_for(PY_TOOL_NAME)
+        if sandbox is not None:
+            command = sandboxed_command(sandbox, command, env=own_env, scratch=scratch)
+        proc = subprocess.Popen(command,
                                 stdin=subprocess.PIPE,
                                 stdout=out,
                                 stderr=subprocess.STDOUT,
@@ -313,9 +267,14 @@ def _run_python(agent, code, timeout):
                                 env=child_env)
     finally:
         # the child owns its ends now; the parent keeps req_r/rep_w. closed even
-        # on a spawn failure so no fd leaks.
+        # on a spawn failure (a sandbox command that does not exist) so no fd
+        # leaks.
         os.close(req_w)
         os.close(rep_r)
+        if proc is None:
+            os.close(req_r)
+            os.close(rep_w)
+            out.close()
 
     try:
         proc.stdin.write(code.encode("utf-8"))
@@ -326,16 +285,17 @@ def _run_python(agent, code, timeout):
         _kill_tree(proc)
         os.close(req_r)
         os.close(rep_w)
-        if staging:
-            shutil.rmtree(staging, ignore_errors=True)
 
     if ended == "timeout":
+        out.close()
         return f"Error: run timed out after {timeout}s"
     if ended == "interrupted":
+        out.close()
         return "Error: run interrupted by user"
 
     out.seek(0)
     text = out.read().decode("utf-8", errors="replace")
+    out.close()
     text = _truncate(text.rstrip("\n"))
     if proc.returncode != 0:
         if text:
@@ -346,7 +306,7 @@ def _run_python(agent, code, timeout):
     return text
 
 
-_DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + stderr).
+_DOC = """Run a Python snippet and return its output (stdout + stderr).
 
     One-shot: fresh interpreter every call, no variables survive between calls.
 
@@ -354,15 +314,9 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
     of the same name (e.g. fs__read_file(file_path='big.log')), and
     tool_call(name, **kwargs) does the same by name.
 
-    Sandbox: the tool can read files and list directories under the working
-    directory, the session scratch dir (os.environ['CAI_SCRATCH']) and any
-    granted paths, and run programs (which see the same files). Where it may
-    write is the active python skill's mode: read-only (the default) under
-    scratch only; read-write also under the working directory and granted
-    paths. No mode has network.
-
-    To change or perform anything the sandbox does not allow - use the
-    provided dedicated tools.
+    Where the snippet runs - which files it can read and write, whether it has
+    network - is described by the python skill. The session scratch dir
+    (os.environ['CAI_SCRATCH']) is the place for intermediates.
 
     Args:
         code:    Python source to execute.
@@ -380,11 +334,14 @@ def make_python(agent):
     # {{tools}} slot (registry.signatures); python must not list itself there -
     # it cannot call itself (see _dispatch_gated).
     python._cai_hide_from_tool_list = True
+    # the one function tool that is a process of its own - what
+    # cai.sandbox("python", ...) covers and the status panel groups it under.
+    python._cai_tool_process = PY_TOOL_NAME
     return python
 
 
 def python_tools(agent):
     """the python tool(s) bound to `agent` - the agent-tools factory analog of
-    subagent_tools. registered unselected on every agent; a python skill
+    subagent_tools. registered unselected on every agent; the python skill
     selects it."""
     return [make_python(agent)]

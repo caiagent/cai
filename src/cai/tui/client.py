@@ -130,6 +130,11 @@ class AgentClient:
         """{active skill: [the tools it declares]}."""
         return self._call("get_skill_tools") or {}
 
+    def get_tool_processes(self):
+        """{process: {kind, sandbox, tools}} for the selected tools - the MCP
+        servers and the python tool, each with the sandbox it runs behind."""
+        return self._call("get_tool_processes") or {}
+
     def set_selected_skills(self, names):
         self._call("set_selected_skills", names)
 

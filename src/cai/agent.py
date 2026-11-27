@@ -210,6 +210,8 @@ class Agent:
         # the caller's env, else the process default (empty until a frontend
         # loads it). a sub-agent / clone inherits its parent's explicitly.
         self.env = env or Environment.default()
+        # an env that was never load()ed (SDK use) is checked here instead.
+        self.env.check_sandboxes()
         self._system_prompt = system_prompt   # base; combined with skills on demand
         self._hooks = hooks   # [(event, fn), ...] or None; turned into a HooksRegistry per run
         self._ui = ui         # UI hooks prompt through; None -> NULL_UI in call_llm
@@ -338,6 +340,28 @@ class Agent:
         tools, for views that group them (the TUI's status panel)."""
         return self.skills_registry.tools_by_skill()
 
+    def get_tool_processes(self):
+        """the processes behind the selected tools, for views that group
+        tools by where they run (the TUI's status panel): {process name:
+        {"kind": "python" | "local" | "remote", "sandbox": the argv prefix it
+        runs behind or None, "tools": [selected tool names it serves]}}. a
+        function tool runs in cai's own process and is in no entry."""
+        processes = {}
+        for tool in self.tools_registry.selected():
+            name = self.tools_registry.process_of(tool)
+            if name is None: continue
+            entry = processes.get(name)
+            if entry is None:
+                entry = {}
+                entry["kind"] = self.env.process_kind(name) or "local"
+                entry["sandbox"] = None
+                if entry["kind"] != "remote":
+                    entry["sandbox"] = self.env.sandbox_for(name)
+                entry["tools"] = []
+                processes[name] = entry
+            entry["tools"].append(tool)
+        return processes
+
     def get_available_skills(self):
         """every skill the agent could activate: the env's catalogue plus the
         ones already active on this agent."""
@@ -383,7 +407,7 @@ class Agent:
         return self.system_prompt
 
     def get_cwd(self):
-        """the working directory the fs sandbox, the python jail and every
+        """the working directory the fs sandbox, a python snippet and every
         relative path resolve against (realpath'd, like safe_path does). a
         process-wide value, as the path policy is, read live so a chdir shows."""
         return os.path.realpath(os.getcwd())

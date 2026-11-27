@@ -155,14 +155,14 @@ def _add_extend_subparser(sub):
 
 def _add_python_subparser(sub):
     """`cai python` - manage the managed virtualenv the python tool runs
-    snippets in. only `install` for now: the sandbox has no network, so
-    packages must be installed from out here."""
+    snippets in. a sandbox the tool runs behind may have no network, so
+    packages are installed from out here."""
     python_parser = sub.add_parser(
         "python",
         help="manage the python tool's virtualenv, then exit.",
         description="manage the cai-managed virtualenv the python tool runs "
-                    "snippets in (~/.config/cai/venv/). the sandbox has no "
-                    "network, so packages are installed from here, outside it.")
+                    "snippets in (~/.config/cai/venv/). packages are installed "
+                    "from here, outside any sandbox the tool runs behind.")
     python_sub = python_parser.add_subparsers(dest="python_command", required=True)
     install_parser = python_sub.add_parser(
         "install",
@@ -749,8 +749,8 @@ def main(argv=None):
     # --allowed-paths / --disallowed-paths: publish the roots as
     # CAI_ALLOWED_PATHS / CAI_DISALLOWED_PATHS after the --cwd chdir (so
     # relative entries resolve against it). cai.safe_path reads the vars
-    # in-process, and every spawned MCP server / python-tool child inherits
-    # them through os.environ.
+    # in-process, and every spawned MCP server inherits them through
+    # os.environ.
     if args.allowed_paths is not None:
         if not _publish_allowed_paths(args.allowed_paths):
             return 1
@@ -826,7 +826,11 @@ def main(argv=None):
                        initial_prompt=prompt)
 
     model = args.model or cfg.model
-    env = Environment.default().load()
+    try:
+        env = Environment.default().load()
+    except ValueError as e:
+        # a cai.sandbox that covers nothing: see Environment.check_sandboxes.
+        parser.error(str(e))
     # the cai.settings skills / tools are auto-activated on every CLI run, merged
     # in on top of any --skill / --tool the user passed.
     tools = Environment.merge_activations(args.tool, env.settings.tools)

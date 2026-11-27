@@ -12,7 +12,8 @@ that scratch directory, and expands a leading $CAI_SCRATCH (the stable name the
 model uses to address scratch without knowing its real, per-session path).
 Extra roots can be granted via the CAI_ALLOWED_PATHS env var (os.pathsep-joined
 files or directories; the --allowed-paths CLI flag sets it), which spawned MCP
-servers and the python-tool child inherit like CAI_SCRATCH. A directory grants
+servers inherit like CAI_SCRATCH (the python tool does not apply it: what a
+snippet reaches is its sandbox's business - see cai.sandbox). A directory grants
 its whole subtree; a file grants just that file. CAI_DISALLOWED_PATHS (the
 --disallowed-paths flag) is the mirror image: paths denied everywhere, even
 inside the cwd or a grant - a deny always wins over an allow. publish() is the

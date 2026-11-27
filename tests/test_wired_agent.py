@@ -291,6 +291,13 @@ def test_control_set_then_get_messages(serve):
     assert messages == seed
 
 
+def test_control_get_tool_processes_empty(serve):
+    wire = serve(make_agent())
+    ok, processes, error = wire.control("get_tool_processes")
+    assert ok is True
+    assert processes == {}
+
+
 def test_control_get_skill_tools_empty(serve):
     wire = serve(make_agent())
     ok, grouped, error = wire.control("get_skill_tools")

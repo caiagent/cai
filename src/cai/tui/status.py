@@ -410,15 +410,64 @@ def _pack_names(names, width, sgr):
     return rows
 
 
-def _status_rows(model, cwd, skills, skill_tools, tools, subagents, allowed, disallowed, user, steer, width):
+def _tool_rows(names, processes, width):
+    """a group of tools as rows of at most width columns, by where each one
+    runs: the function tools (cai's own process) packed first, then one block
+    per tool process - an MCP server or the python tool (processes: {name:
+    {kind, sandbox, tools}}) - headed by its name, then the sandbox it runs
+    behind, then its tools without the server prefix."""
+    from cai.screen.ansi import SGR_DIM_GRAY, SGR_GREEN, SGR_YELLOW, SGR_BOLD
+
+    owner = {}
+    for process, entry in processes.items():
+        for tool in entry.get("tools") or []:
+            owner[tool] = process
+    plain = []
+    grouped = {}
+    for name in names:
+        process = owner.get(name)
+        if process is None:
+            plain.append(name)
+            continue
+        grouped.setdefault(process, []).append(name)
+
+    rows = _pack_names(plain, width, SGR_GREEN)
+    inner = max(1, width - 2)
+    for process in sorted(grouped.keys()):
+        entry = processes[process]
+        rows.append([("▸ ", SGR_DIM_GRAY), (_clip_head(process, inner), SGR_BOLD)])
+        sandbox = entry.get("sandbox")
+        if entry.get("kind") == "remote":
+            rows.append([("  ", ""), ("remote, no sandbox", SGR_DIM_GRAY)])
+        elif sandbox:
+            label = "sandbox "
+            command = _clip_head(" ".join(sandbox), max(1, inner - len(label)))
+            rows.append([("  ", ""), (label, SGR_DIM_GRAY), (command, "")])
+        else:
+            rows.append([("  ", ""), ("no sandbox", SGR_YELLOW)])
+        short = []
+        prefix = process + "__"
+        for name in grouped[process]:
+            # the python tool is its own process: its name is the heading.
+            if name == process: continue
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+            short.append(name)
+        for packed in _pack_names(short, inner, SGR_GREEN):
+            rows.append([("  ", "")] + packed)
+    return rows
+
+
+def _status_rows(model, cwd, skills, skill_tools, processes, tools, subagents, allowed, disallowed, user, steer, width):
     """the status panel body as rows of (text, sgr) segments, at most width
     columns each: a label column and the values beside it. the model and cwd
     lead (the fs sandbox and relative paths resolve against the cwd); every
     skill is a bold row with its own tools (skill_tools: {skill: [tools]})
-    indented beneath it, and the tools no skill declares get a row of their
-    own; a
-    section with nothing to list is left out, so path grants and the pending
-    counts only show once there are any."""
+    indented beneath it, grouped by the process that serves them - each MCP
+    server and the python tool with its sandbox, see _tool_rows - and the
+    tools no skill declares get a section of their own, grouped the same
+    way; a section with nothing to list is left out, so path grants and the
+    pending counts only show once there are any."""
     from cai.screen.ansi import (
         SGR_BOLD, SGR_CYAN, SGR_DIM_GRAY, SGR_GREEN, SGR_RED, SGR_YELLOW,
         SGR_BOLD_AZURE, SGR_MAGENTA,
@@ -463,8 +512,8 @@ def _status_rows(model, cwd, skills, skill_tools, tools, subagents, allowed, dis
             own.append(tool)
             claimed.add(tool)
         value_rows = [[("◆ ", SGR_MAGENTA), (_clip_head(skill, value_width - 2), SGR_BOLD)]]
-        for packed in _pack_names(own, value_width - 2, SGR_GREEN):
-            value_rows.append([("  ", "")] + packed)
+        for tool_row in _tool_rows(own, processes, value_width - 2):
+            value_rows.append([("  ", "")] + tool_row)
         label = ""
         count = None
         if skill == skills[0]:
@@ -476,7 +525,7 @@ def _status_rows(model, cwd, skills, skill_tools, tools, subagents, allowed, dis
         if tool in claimed: continue
         loose.append(tool)
     if loose:
-        section("tools", len(loose), _pack_names(loose, value_width, SGR_GREEN))
+        section("tools", len(loose), _tool_rows(loose, processes, value_width))
     if subagents:
         agent_rows = []
         for name in subagents:
@@ -556,8 +605,9 @@ def _status_panel_lines(rows, max_rows, max_cols):
 
 class _StatusPanel:
     """the Tab-toggled status panel: a framed window in the middle of the
-    viewport showing the agent's model and cwd, active skills and tools and
-    path grants/denies (read over the wire), the live sub-agents (fed by the
+    viewport showing the agent's model and cwd, active skills, the MCP servers
+    behind their tools (each with its sandbox) and the tools, path
+    grants/denies (read over the wire), the live sub-agents (fed by the
     poll loop), and the pending counts. it hovers - the conversation and the
     prompt stay live beneath it. toggle() shows/hides it and paints at once;
     once shown, the next keypress hides it (the screen calls hide(): Tab and
@@ -605,6 +655,7 @@ class _StatusPanel:
             info = self._client.get_info()
             skills = list(self._client.get_selected_skills())
             skill_tools = self._client.get_skill_tools()
+            processes = self._client.get_tool_processes()
             tools = sorted(self._client.get_selected_tools())
             paths = self._client.get_paths()
         except OSError:
@@ -620,6 +671,7 @@ class _StatusPanel:
                                 info.get("cwd", ""),
                                 skills,
                                 skill_tools,
+                                processes,
                                 tools,
                                 subagents,
                                 paths.get("allowed") or [],

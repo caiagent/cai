@@ -31,9 +31,9 @@ def test_load_optional_reads_the_file():
 
 
 def test_settings_shadow_an_optional_key():
-    _write_config({"base_url": "u", "model": "m", "python_sandbox": "kernel"})
-    Environment.default().settings.python_sandbox = "hook"
-    assert config.load_optional("python_sandbox", "kernel") == "hook"
+    _write_config({"base_url": "u", "model": "m", "python_base": "/from/file"})
+    Environment.default().settings.python_base = "/from/init"
+    assert config.load_optional("python_base", "python3") == "/from/init"
 
 
 def test_settings_shadow_a_required_field():
@@ -47,7 +47,7 @@ def test_settings_shadow_a_required_field():
 def test_unset_settings_fall_through_to_the_file():
     _write_config({"base_url": "u", "model": "m"})
     # the shadow fields default to None - nothing set, so the file wins
-    assert config.load_optional("python_sandbox", "kernel") == "kernel"
+    assert config.load_optional("python_base", "python3") == "python3"
     assert config.load_config().model == "m"
 
 
