@@ -14,9 +14,11 @@ from .state import Mode
 
 
 def _count_visual_rows(line, prefix_len, cols):
-    """visual (terminal-wrapped) row count for one logical prompt line."""
+    """visual (terminal-wrapped) row count for one logical prompt line. the
+    cell after the last character counts too - the cursor sits there - so a
+    line that exactly fills its last row takes one more, empty, row."""
     total = prefix_len + len(line)
-    return max(1, (total + cols - 1) // cols)
+    return total // cols + 1
 
 
 def _cursor_visual_pos(input_buf, cursor_pos, prompt_prefix, cont_prefix, cols, line_vrows):
@@ -71,6 +73,10 @@ class Layout:
         self._rows = max(3, rows)
         self._cols = max(1, cols)
         self._input_height = 1
+        # first visual row of the prompt shown in the input area: non-zero
+        # once the prompt is taller than the area and has scrolled to keep
+        # the cursor in view. render_input owns it.
+        self._input_scroll = 0
         # what each terminal row (1-based) showed after the last paint. a
         # render only emits the rows whose payload differs, so a streamed
         # token repaints one row, not the whole screen.
@@ -137,6 +143,11 @@ class Layout:
     @property
     def input_height(self):
         return self._input_height
+
+    @property
+    def input_scroll(self):
+        """visual rows of the prompt scrolled off above the input area."""
+        return self._input_scroll
 
     def update_input_height(self, input_buf, prompt_prefix, cont_prefix):
         """recompute input area height based on current buffer content."""
@@ -384,24 +395,39 @@ class Layout:
             if i > 0:
                 prefix = cont_prefix
             wrapped = wrap_ansi(f'{prefix}{line}', cols)
-            if not wrapped:
-                wrapped = ['']
+            # keep each line on exactly the rows counted for it, so the
+            # cursor maths and the painted rows cannot drift apart
+            wrapped = wrapped[:line_vrows[i]]
+            while len(wrapped) < line_vrows[i]:
+                wrapped.append('')
             visual.extend(wrapped)
-        for vr in range(self.status_row - input_start):
+
+        # a prompt taller than the input area scrolls: move the window just
+        # far enough to keep the cursor's row inside it.
+        height = self.status_row - input_start
+        cursor_vrow, cursor_col = _cursor_visual_pos(input_buf,
+                                                     cursor_pos,
+                                                     prompt_prefix,
+                                                     cont_prefix,
+                                                     cols,
+                                                     line_vrows)
+        scroll = self._input_scroll
+        if cursor_vrow < scroll:
+            scroll = cursor_vrow
+        if cursor_vrow >= scroll + height:
+            scroll = cursor_vrow - height + 1
+        scroll = max(0, min(scroll, len(visual) - height))
+        self._input_scroll = scroll
+
+        for vr in range(height):
             text = ''
-            if vr < len(visual):
-                text = visual[vr]
+            if scroll + vr < len(visual):
+                text = visual[scroll + vr]
             self._paint_row(out, input_start + vr, text, cols)
 
         if mode == Mode.INSERT:
             # position cursor in prompt area
-            cursor_vrow, cursor_col = _cursor_visual_pos(input_buf,
-                                                         cursor_pos,
-                                                         prompt_prefix,
-                                                         cont_prefix,
-                                                         cols,
-                                                         line_vrows)
-            abs_cursor_row = input_start + cursor_vrow
+            abs_cursor_row = input_start + cursor_vrow - scroll
             out.append(cur_move(abs_cursor_row, cursor_col + 1))
             out.append(CUR_SHOW)
         sys.stdout.write(''.join(out))

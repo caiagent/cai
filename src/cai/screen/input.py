@@ -122,7 +122,8 @@ def parse_mouse(seq):
 
 def input_pos_from_click(input_buf, vrow, tcol, prompt_prefix, cont_prefix, cols):
     """map a click in the input area to an index into input_buf. vrow is the
-    0-based visual row within the input area, tcol the 0-based terminal column.
+    0-based visual row within the whole prompt (the caller adds the rows
+    scrolled off above the input area), tcol the 0-based terminal column.
     mirrors layout.render_input's wrapping; clamps out-of-range clicks to the
     nearest valid position."""
     cols = max(1, cols)
@@ -136,7 +137,7 @@ def input_pos_from_click(input_buf, vrow, tcol, prompt_prefix, cont_prefix, cols
         prefix = prompt_prefix
         if i > 0:
             prefix = cont_prefix
-        vrows = max(1, (len(prefix) + len(line) + cols - 1) // cols)
+        vrows = (len(prefix) + len(line)) // cols + 1
         if row_in_line < vrows:
             target = i
             break

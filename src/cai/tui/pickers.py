@@ -145,7 +145,7 @@ def _open_history(screen, client, status, jobs, cfg):
 def _prompt_entries(history):
     """the :prompts entries: label -> full prompt, newest first, blanks
     skipped and duplicates dropped (the newest occurrence wins). the label
-    is the prompt flattened to one line - it is what the fuzzy filter
+    is the prompt flattened to one line - it is what the word filter
     matches against, so the whole prompt is searchable, not just the part
     that fits the row."""
     entries = {}
@@ -158,7 +158,7 @@ def _prompt_entries(history):
 
 
 def _open_prompts(screen):
-    """open the :prompts picker - a fuzzy finder over the prompt history.
+    """open the :prompts picker - a word search over the prompt history.
     picking an entry drops it into the input box for editing, exactly like
     the Ctrl-X recall; nothing is submitted until the user hits Enter."""
     from cai.screen.ansi import wrap_ansi

@@ -110,6 +110,7 @@ class Screen:
         self._cursor_pos = 0
         self._history = self._load_history()
         self._history_idx = -1
+        self._history_draft = []
         self._in_prompt = False
         self._current_prompt_msg = '> '
 
@@ -961,6 +962,7 @@ class Screen:
         # submit (below) or Ctrl-C (see modes.py). so a ':' command that exits
         # and re-enters prompt() keeps the half-typed input intact.
         self._history_idx = -1
+        self._history_draft = []
         self._command_result = None
 
         # normal is the resting mode: a fresh screen starts in it, a
@@ -1200,10 +1202,11 @@ class Screen:
             self.pop_focus()
 
     def prompt_history_overlay(self, entries, preview_fn=None):
-        """fuzzy picker over prompt-history entries (kept in the caller's
-        newest-first order): type to filter, the preview pane shows the full
-        prompt. returns the picked entry or None on cancel."""
-        from .overlays.model import prompt_model_overlay
+        """picker over prompt-history entries (kept in the caller's
+        newest-first order): type words to filter - every word must appear in
+        the prompt - and the preview pane shows the full prompt. returns the
+        picked entry or None on cancel."""
+        from .overlays.model import prompt_model_overlay, _terms_match
 
         self.push_focus('model')
         try:
@@ -1211,7 +1214,8 @@ class Screen:
                                         entries,
                                         presorted=True,
                                         noun="prompts",
-                                        preview_fn=preview_fn)
+                                        preview_fn=preview_fn,
+                                        match_fn=_terms_match)
         finally:
             self.pop_focus()
 

@@ -657,6 +657,15 @@ class ModeHandler:
                 screen.pop_focus()
             return
 
+        # PgUp / PgDn page through a multi-line prompt; on a one-line
+        # prompt they scroll the conversation, below.
+        if key in (KEY_PGUP, KEY_PGDN) and '\n' in screen._input_buf:
+            direction = 1
+            if key == KEY_PGUP:
+                direction = -1
+            self._handle_insert_page(state, screen, direction)
+            return
+
         # Scroll keys: switch to normal mode and execute the scroll
         if key in (KEY_CTRL_U, KEY_CTRL_D, KEY_PGUP, KEY_PGDN):
             self._insert_to_normal(state, screen)
@@ -749,46 +758,87 @@ class ModeHandler:
         screen._in_prompt = False
         raise SubmitException(result)
 
-    def _handle_insert_arrow_up(self, state, screen):
+    def _input_cursor_line(self, screen):
+        """(lines of the prompt, index of the line the cursor is on, its
+        column on that line)."""
         all_lines = ''.join(screen._input_buf).split('\n')
-        before = ''.join(screen._input_buf[:screen._cursor_pos])
-        lines_before = before.split('\n')
-        cur_line = len(lines_before) - 1
-        if cur_line == 0:
-            idx, buf, pos = history_navigate(
-                1, screen._history, screen._history_idx,
-                screen._input_buf, screen._cursor_pos
-            )
-            screen._history_idx = idx
-            screen._input_buf = buf
-            screen._cursor_pos = pos
-        else:
-            cur_col = len(lines_before[-1])
-            target_col = min(cur_col, len(all_lines[cur_line - 1]))
-            screen._cursor_pos = (
-                sum(len(all_lines[i]) + 1 for i in range(cur_line - 1)) + target_col
-            )
+        lines_before = ''.join(screen._input_buf[:screen._cursor_pos]).split('\n')
+        return all_lines, len(lines_before) - 1, len(lines_before[-1])
+
+    def _input_move_lines(self, screen, delta):
+        """move the prompt cursor delta lines (negative is up), keeping its
+        column where the target line is long enough and stopping at the first
+        / last line."""
+        all_lines, cur_line, cur_col = self._input_cursor_line(screen)
+        target = max(0, min(len(all_lines) - 1, cur_line + delta))
+        target_col = min(cur_col, len(all_lines[target]))
+        screen._cursor_pos = sum(len(all_lines[i]) + 1 for i in range(target)) + target_col
+
+    def _input_is_recalled(self, screen):
+        """True while the prompt is a history entry exactly as recalled -
+        nothing of the user's own would be lost by replacing it."""
+        idx = screen._history_idx
+        if idx < 0: return False
+        return ''.join(screen._input_buf) == screen._history[idx]
+
+    def _handle_insert_arrow_up(self, state, screen):
+        all_lines, cur_line, _ = self._input_cursor_line(screen)
+        if cur_line > 0:
+            self._input_move_lines(screen, -1)
+            screen._refresh_input()
+            return
+        # the first line: step back in the history - but never away from a
+        # multi-line prompt the user wrote or edited.
+        if len(all_lines) > 1 and not self._input_is_recalled(screen):
+            return
+        if screen._history_idx == -1:
+            # leaving the prompt being written: keep it for the way back
+            screen._history_draft = list(screen._input_buf)
+        idx, buf, pos = history_navigate(
+            1, screen._history, screen._history_idx,
+            screen._input_buf, screen._cursor_pos
+        )
+        screen._history_idx = idx
+        screen._input_buf = buf
+        screen._cursor_pos = pos
         screen._refresh_input()
 
     def _handle_insert_arrow_down(self, state, screen):
-        all_lines = ''.join(screen._input_buf).split('\n')
-        before = ''.join(screen._input_buf[:screen._cursor_pos])
-        lines_before = before.split('\n')
-        cur_line = len(lines_before) - 1
-        if cur_line == len(all_lines) - 1:
-            idx, buf, pos = history_navigate(
-                -1, screen._history, screen._history_idx,
-                screen._input_buf, screen._cursor_pos
-            )
-            screen._history_idx = idx
-            screen._input_buf = buf
-            screen._cursor_pos = pos
-        else:
-            cur_col = len(lines_before[-1])
-            target_col = min(cur_col, len(all_lines[cur_line + 1]))
-            screen._cursor_pos = (
-                sum(len(all_lines[i]) + 1 for i in range(cur_line + 1)) + target_col
-            )
+        all_lines, cur_line, _ = self._input_cursor_line(screen)
+        if cur_line < len(all_lines) - 1:
+            self._input_move_lines(screen, 1)
+            screen._refresh_input()
+            return
+        # the last line: step forward in the history. a new prompt (or a
+        # recalled one since edited) has nothing after it - leave it alone.
+        if not self._input_is_recalled(screen):
+            return
+        idx, buf, pos = history_navigate(
+            -1, screen._history, screen._history_idx,
+            screen._input_buf, screen._cursor_pos
+        )
+        if idx == -1:
+            # back past the newest entry: the prompt that was being written
+            buf = list(screen._history_draft)
+            pos = len(buf)
+        screen._history_idx = idx
+        screen._input_buf = buf
+        screen._cursor_pos = pos
+        screen._refresh_input()
+
+    def _handle_insert_page(self, state, screen, direction):
+        """PgUp / PgDn in a multi-line prompt: the arrow keys, a page (the
+        input area's height) at a time. at the first / last line they do
+        what the arrow does there."""
+        all_lines, cur_line, _ = self._input_cursor_line(screen)
+        at_end = cur_line == len(all_lines) - 1
+        if direction < 0 and cur_line == 0:
+            self._handle_insert_arrow_up(state, screen)
+            return
+        if direction > 0 and at_end:
+            self._handle_insert_arrow_down(state, screen)
+            return
+        self._input_move_lines(screen, direction * screen._layout.input_height)
         screen._refresh_input()
 
     def _handle_visual(self, key, state, screen):
@@ -1277,7 +1327,7 @@ class ModeHandler:
         total = screen._buffer.line_count()
         content_rows = screen._layout.content_rows
         state.viewport_offset = max(0, total - content_rows)
-        vrow = row - screen._layout.input_start_row
+        vrow = row - screen._layout.input_start_row + screen._layout.input_scroll
         screen._cursor_pos = input_pos_from_click(screen._input_buf,
                                                   vrow,
                                                   col - 1,

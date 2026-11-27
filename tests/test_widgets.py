@@ -753,3 +753,22 @@ def test_ctrl_c_in_an_extension_command_ends_the_command_not_the_tui():
     assert _dispatch({}, _CmdTabs(tab), "slow") is False    # False: the TUI carries on
     assert tab.screen.written == ["[:slow interrupted]\n"]
 
+
+
+# ── :prompts word search ─────────────────────────────────────────────────────
+
+from cai.screen.overlays.model import _filter_and_sort, _terms_match
+
+
+def test_terms_match_needs_every_word_as_a_substring():
+    # a scattered-letter subsequence ("fx" in "fix") is not a hit
+    assert _terms_match("fx", "fix the tui crash")[0] is False
+    assert _terms_match("crash fix", "fix the tui crash")[0] is True
+    assert _terms_match("crash sandbox", "fix the tui crash")[0] is False
+    assert _terms_match("TUI", "fix the tui crash") == (True, 0, [8, 9, 10])
+
+
+def test_prompt_search_keeps_newest_first_and_ranks_phrase_hits_first():
+    entries = ["crash in the tui", "tui crash on resize", "add themes", "the tui crash again"]
+    names = [name for name, _ in _filter_and_sort(entries, "tui crash", None, _terms_match)]
+    assert names == ["tui crash on resize", "the tui crash again", "crash in the tui"]

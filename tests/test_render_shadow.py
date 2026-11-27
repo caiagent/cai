@@ -83,3 +83,41 @@ def test_status_and_input_rows_go_through_the_shadow(capsys):
     assert capsys.readouterr().out == ""
     layout.render_status(Mode.NORMAL, "changed", cols=40)
     assert cur_move(10, 1) in capsys.readouterr().out
+
+
+def _input_frame(layout, text, cursor_pos, cols=20):
+    """render the prompt and return (cursor row, cursor col) from the frame."""
+    import re
+    buf = list(text)
+    layout.update_input_height(buf, "> ", "  ")
+    layout.render_input(buf, cursor_pos, Mode.INSERT, "> ", "  ", cols)
+    moves = re.findall(r"\x1b\[(\d+);(\d+)H", layout_out())
+    return int(moves[-1][0]), int(moves[-1][1])
+
+
+def test_tall_prompt_scrolls_to_keep_the_cursor_above_the_status_line(capsys):
+    global layout_out
+    layout_out = lambda: capsys.readouterr().out
+    layout = Layout(12, 20)                      # input area caps at 4 rows
+    text = "\n".join(f"line{i}" for i in range(10))
+    row, _ = _input_frame(layout, text, len(text))
+    assert layout.input_height == 4
+    assert row == layout.status_row - 1          # last input row, not the status row
+    assert layout.input_scroll == 6
+    # moving the cursor back to the top scrolls the window back with it
+    row, col = _input_frame(layout, text, 0)
+    assert (row, col) == (layout.input_start_row, 3)
+    assert layout.input_scroll == 0
+    # and deleting the text un-scrolls
+    _input_frame(layout, "hi", 2)
+    assert layout.input_scroll == 0
+
+
+def test_cursor_after_a_full_row_gets_its_own_row(capsys):
+    global layout_out
+    layout_out = lambda: capsys.readouterr().out
+    layout = Layout(12, 20)
+    text = "x" * 18                              # "> " + 18 fills the row exactly
+    row, col = _input_frame(layout, text, len(text))
+    assert layout.input_height == 2
+    assert (row, col) == (layout.status_row - 1, 1)

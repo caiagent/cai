@@ -211,7 +211,7 @@ _SESSION_COMMANDS = [
     _Command("history", "fork back to an earlier point in this conversation",
              lambda ctx: _open_history(ctx.screen, ctx.client, ctx.status, ctx.jobs, ctx.settings),
              idle=True),
-    _Command("prompts", "fuzzy-search your prompt history",
+    _Command("prompts", "search your prompt history",
              lambda ctx: _open_prompts(ctx.screen)),
     _Command("continue", "continue the conversation without a new prompt", _continue, idle=True),
     _Command("agents", "live view of sub-agents",

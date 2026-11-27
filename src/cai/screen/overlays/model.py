@@ -76,9 +76,38 @@ def _fuzzy_match(pattern, text):
     return True, score, positions
 
 
-def _filter_and_sort(models, pattern, favorites=None):
-    """models matching pattern, sorted by fuzzy score. each element is
-    (model_name, match_positions). when favorites is given, matching favorites
+def _terms_match(pattern, text):
+    """word match for prose (prompt history): the pattern is split on
+    whitespace and every term must appear in text as a case-insensitive
+    substring, in any order. same return shape as _fuzzy_match. the score only
+    separates a hit on the whole phrase (0) from scattered terms (1), so the
+    stable sort keeps the caller's order within each group."""
+    terms = pattern.lower().split()
+    if not terms:
+        return True, 0, []
+
+    txt = text.lower()
+    positions = set()
+    for term in terms:
+        found = txt.find(term)
+        if found == -1:
+            return False, 0, []
+        positions.update(range(found, found + len(term)))
+
+    score = 1
+    phrase = " ".join(terms)
+    found = txt.find(phrase)
+    if found != -1:
+        score = 0
+        positions = set(range(found, found + len(phrase)))
+    return True, score, sorted(positions)
+
+
+def _filter_and_sort(models, pattern, favorites=None, match_fn=_fuzzy_match):
+    """models matching pattern, sorted by match score (ties keep the input
+    order). each element is (model_name, match_positions). match_fn is the
+    matcher - _fuzzy_match, or _terms_match for prose. when favorites is given,
+    matching favorites
     are grouped first, a (None, None) divider sentinel separates the groups,
     then the rest follow - so the picker shows a favorites section on top."""
     if not pattern:
@@ -88,7 +117,7 @@ def _filter_and_sort(models, pattern, favorites=None):
     else:
         results = []
         for m in models:
-            ok, score, positions = _fuzzy_match(pattern, m)
+            ok, score, positions = match_fn(pattern, m)
             if ok:
                 results.append((score, m, positions))
         results.sort(key=lambda t: t[0])
@@ -436,7 +465,7 @@ def _draw_model_overlay(rows,
 def prompt_model_overlay(screen, models, *, presorted=False,
                          noun="models", preview_fn=None, navigate=False,
                          prices=None, favorites=False,
-                         on_move=None, initial=None):
+                         on_move=None, initial=None, match_fn=_fuzzy_match):
     """interactive fuzzy picker. returns the selected item or None on
     cancel. used for the model list (sorted alphabetically) and the session
     list (presorted=True to preserve the caller's newest-first order).
@@ -450,7 +479,8 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     section on top (loaded/persisted client-side) with Tab to toggle.
     on_move(item), when given, is called whenever the cursor lands on a
     different item (and once for the first one) - a live preview hook.
-    initial is the item the cursor starts on."""
+    initial is the item the cursor starts on. match_fn is the live-filter
+    matcher (_fuzzy_match by default; _terms_match for prose)."""
     if not models:
         return None
 
@@ -471,7 +501,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
     if not presorted:
         models = sorted(models)
     search_buf = []
-    filtered = _filter_and_sort(models, '', fav_set)
+    filtered = _filter_and_sort(models, '', fav_set, match_fn)
     selected_idx = 0
     if initial is not None:
         for i, item in enumerate(filtered):
@@ -606,7 +636,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
             # cancel - first esc clears a pending search, second exits
             if key == KEY_ESC and search_buf:
                 search_buf = []
-                filtered = _filter_and_sort(models, '', fav_set)
+                filtered = _filter_and_sort(models, '', fav_set, match_fn)
                 selected_idx = 0
                 _redraw()
                 continue
@@ -632,7 +662,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
                         else:
                             fav_set.add(name)
                         toggle_favorite(name)
-                        filtered = _filter_and_sort(models, ''.join(search_buf), fav_set)
+                        filtered = _filter_and_sort(models, ''.join(search_buf), fav_set, match_fn)
                         selected_idx = 0
                         for i, item in enumerate(filtered):
                             if item[0] == name:
@@ -681,7 +711,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
             if key == KEY_BACKSPACE:
                 if search_buf:
                     search_buf.pop()
-                    filtered = _filter_and_sort(models, ''.join(search_buf), fav_set)
+                    filtered = _filter_and_sort(models, ''.join(search_buf), fav_set, match_fn)
                     selected_idx = min(selected_idx, max(0, len(filtered) - 1))
                     if _is_divider(filtered, selected_idx):
                         selected_idx = max(0, selected_idx - 1)
@@ -691,7 +721,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
             # printable character - update search
             if len(key) == 1 and ord(key) >= 32:
                 search_buf.append(key)
-                filtered = _filter_and_sort(models, ''.join(search_buf), fav_set)
+                filtered = _filter_and_sort(models, ''.join(search_buf), fav_set, match_fn)
                 selected_idx = 0
                 _redraw()
                 continue
